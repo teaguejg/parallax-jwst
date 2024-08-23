@@ -1,0 +1,27 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+venv/
+.venv/
+
+# editor and tool caches
+.vscode/
+.idea/
+.claude/
+
+# project config (edit locally, never commit)
+config.yaml
+
+# project data and generated output
+data/reports/
+data/archive/
+data/processed/
+data/*.db
+*.log
+
+# dev artifacts
+CLAUDE.md
