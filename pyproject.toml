@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parallax-jwst"
+version = "1.0.0"
+description = "A Python library for exploring publicly available JWST data from the MAST archive."
+authors = [{name = "Jeff Teague", email = "teaguejg@yahoo.com"}]
+license = {file = "LICENSE"}
+readme = "README.md"
+requires-python = ">=3.12"
+keywords = ["astronomy", "JWST", "MAST", "NIRCam", "astrophysics", "source detection"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "astropy>=5.3",
+    "astroquery>=0.4.8",
+    "photutils>=1.9",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "scipy>=1.11",
+    "PyQt6>=6.4",
+]
+
+[project.urls]
+Repository = "https://github.com/teaguejg/parallax-jwst"
+Issues = "https://github.com/teaguejg/parallax-jwst/issues"
+
+[project.scripts]
+parallax = "parallax.gui:launch"
+
+[tool.setuptools.packages.find]
+include = ["parallax*"]
