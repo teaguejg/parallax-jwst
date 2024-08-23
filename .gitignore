@@ -11,7 +11,6 @@ venv/
 # editor and tool caches
 .vscode/
 .idea/
-.claude/
 
 # project config (edit locally, never commit)
 config.yaml
@@ -22,7 +21,3 @@ data/archive/
 data/processed/
 data/*.db
 *.log
-
-# dev artifacts
-CLAUDE.md
-*.secret
