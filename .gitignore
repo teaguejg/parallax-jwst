@@ -25,3 +25,4 @@ data/*.db
 
 # dev artifacts
 CLAUDE.md
+*.secret
