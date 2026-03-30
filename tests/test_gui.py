@@ -88,3 +88,12 @@ def test_session_log_handler_format():
 
     assert msgs[0] == "WARNING something broke"
     assert msgs[1] == "DEBUG trace detail"
+
+
+def test_inspect_window_close_cleanup(tmp_db):
+    from parallax.gui.panels.inspect import InspectWindow
+    # candidate doesn't exist, but window should still open and close cleanly
+    win = InspectWindow("cnd_nonexist")
+    win.show()
+    win.close()
+    # no segfault or timer warning = success

@@ -111,6 +111,18 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _safe_json_dict(val):
+    """coerce a possibly-broken JSON string to a dict"""
+    if not val:
+        return {}
+    try:
+        import json
+        out = json.loads(val)
+        return out if isinstance(out, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def report_to_dict(r: Report) -> dict:
     from dataclasses import asdict
     d = asdict(r)
@@ -139,7 +151,7 @@ def report_from_dict(d: dict) -> Report:
                 separation_arcsec=m["separation_arcsec"],
                 object_type=m.get("object_type"),
                 redshift=m.get("redshift"),
-                data=m.get("data", {}),
+                data=m.get("data") or {},
             ))
 
         dets = []

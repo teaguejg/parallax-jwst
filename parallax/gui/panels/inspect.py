@@ -591,6 +591,31 @@ class InspectWindow(QDialog):
             err.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._root.insertWidget(1, err)
 
+    def closeEvent(self, event):
+        # stop matplotlib canvas timers before Qt tears down the widget tree
+        for attr in ("_composite_canvas", "_strip_canvas"):
+            canvas = getattr(self, attr, None)
+            if canvas is None:
+                continue
+            try:
+                # kill any pending draw timer
+                if hasattr(canvas, "_timer"):
+                    canvas._timer.stop()
+                canvas.close()
+            except Exception:
+                pass
+        for attr in ("_composite_fig", "_strip_fig"):
+            fig = getattr(self, attr, None)
+            if fig is None:
+                continue
+            try:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+            except Exception:
+                pass
+        self.deleteLater()
+        super().closeEvent(event)
+
     def _show_error(self, msg):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(msg))

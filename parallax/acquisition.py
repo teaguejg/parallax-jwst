@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import sys
@@ -15,6 +16,27 @@ from parallax.types import _target_slug
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _quiet_stdout():
+    """redirect stdout to devnull, guaranteed restore on any exit"""
+    real = sys.stdout
+    devnull = None
+    try:
+        devnull = open(os.devnull, "w")
+        sys.stdout = devnull
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        sys.stdout = real
+        if devnull is not None:
+            try:
+                devnull.close()
+            except Exception:
+                pass
 
 
 def _resolve_name(name):
@@ -58,14 +80,7 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
     from astroquery.mast import Observations
 
     # mast prints progress to stdout; crashes when stdout is None (bat launcher)
-    _real_stdout = sys.stdout
-    _devnull = None
-    try:
-        try:
-            _devnull = open(os.devnull, "w")
-            sys.stdout = _devnull
-        except Exception:
-            pass
+    with _quiet_stdout():
         products = Observations.get_product_list(obs_rows)
         products = Observations.filter_products(products, productType="SCIENCE")
         if len(products) == 0:
@@ -94,13 +109,6 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
             except Exception as e:
                 logger.warning("failed to download %s: %s", filename, e)
                 continue
-    finally:
-        sys.stdout = _real_stdout
-        if _devnull is not None:
-            try:
-                _devnull.close()
-            except Exception:
-                pass
 
     return [str(p) for p in paths_downloaded if str(p).endswith(".fits")]
 
@@ -108,28 +116,17 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
 def _get_expected_filenames(obs_rows) -> set[str]:
     """Return the set of expected i2d mosaic filenames from MAST product list."""
     from astroquery.mast import Observations
-    _real_stdout = sys.stdout
     try:
-        _devnull = open(os.devnull, "w")
-        sys.stdout = _devnull
-    except Exception:
-        pass
-    try:
-        products = Observations.get_product_list(obs_rows)
-        products = Observations.filter_products(products, productType="SCIENCE")
-        products = products[["_i2d.fits" in str(p)
-                             for p in products["productFilename"]]]
-        products = products[["_t" not in str(p)
-                             for p in products["productFilename"]]]
-        return {os.path.basename(str(p)) for p in products["productFilename"]}
+        with _quiet_stdout():
+            products = Observations.get_product_list(obs_rows)
+            products = Observations.filter_products(products, productType="SCIENCE")
+            products = products[["_i2d.fits" in str(p)
+                                 for p in products["productFilename"]]]
+            products = products[["_t" not in str(p)
+                                 for p in products["productFilename"]]]
+            return {os.path.basename(str(p)) for p in products["productFilename"]}
     except Exception:
         return set()
-    finally:
-        sys.stdout = _real_stdout
-        try:
-            _devnull.close()
-        except Exception:
-            pass
 
 
 def _validate_local_fits(paths):
