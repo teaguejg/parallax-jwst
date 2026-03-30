@@ -45,8 +45,9 @@ def _fits_hash(fits_path, snr_threshold, min_pixels, kernel_fwhm):
     mtime = os.path.getmtime(fits_path)
     box_size = config.get("detection.background_box_size", 50)
     box_size_2 = config.get("detection.background_box_size_2", 0)
+    filter_size = config.get("detection.background_filter_size", 3)
     interp_mode = config.get("detection.background_interp", "zoom")
-    key = f"{fits_path}:{mtime}:{snr_threshold}:{min_pixels}:{kernel_fwhm}:{box_size}:{box_size_2}:{interp_mode}"
+    key = f"{fits_path}:{mtime}:{snr_threshold}:{min_pixels}:{kernel_fwhm}:{box_size}:{box_size_2}:{filter_size}:{interp_mode}"
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 

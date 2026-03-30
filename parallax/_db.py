@@ -1,6 +1,9 @@
 from contextlib import contextmanager
+import logging
 import sqlite3
 from parallax.config import config
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -8,6 +11,7 @@ def get_db():
     path = config.get("data.db_path")
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
@@ -22,6 +26,7 @@ def init_db():
     """Create schema if not present."""
     # TODO: add migration support for schema changes
     with get_db() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         for stmt in [
             "ALTER TABLE reports ADD COLUMN fingerprint TEXT",
@@ -30,15 +35,18 @@ def init_db():
         ]:
             try:
                 conn.execute(stmt)
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass
+                else:
+                    logger.warning("migration failed: %s -- %s", stmt, e)
         try:
             conn.execute(
                 "UPDATE candidates SET classification = 'known' "
                 "WHERE classification = 'known-but-notable'"
             )
-        except Exception:
-            pass
+        except sqlite3.OperationalError as e:
+            logger.warning("classification migration: %s", e)
 
 
 _SCHEMA = """

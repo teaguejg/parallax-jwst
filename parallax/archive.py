@@ -14,7 +14,7 @@ from parallax.config import config
 from parallax._db import get_db
 from parallax.types import (
     Candidate, CatalogMatch, Detection, Report,
-    report_to_dict, report_from_dict,
+    report_to_dict, report_from_dict, _safe_json_dict,
 )
 from parallax import catalog
 
@@ -53,7 +53,7 @@ def _row_to_report(row, conn) -> Report:
                 separation_arcsec=mr["separation_arcsec"] or 0.0,
                 object_type=mr["object_type"],
                 redshift=mr["redshift"],
-                data=json.loads(mr["data"]) if mr["data"] else {},
+                data=_safe_json_dict(mr["data"]),
             ))
 
         det_rows = conn.execute(
@@ -199,7 +199,7 @@ def search_candidates(query: str, field: str | None = None) -> list[Candidate]:
                     separation_arcsec=mr["separation_arcsec"] or 0.0,
                     object_type=mr["object_type"],
                     redshift=mr["redshift"],
-                    data=json.loads(mr["data"]) if mr["data"] else {},
+                    data=_safe_json_dict(mr["data"]),
                 ))
             created = row["created_at"]
             if isinstance(created, str):

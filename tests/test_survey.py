@@ -1,6 +1,7 @@
 import json
 import os
 import math
+import sys
 import tempfile
 from datetime import datetime, timedelta, UTC
 from unittest.mock import patch, MagicMock
@@ -1074,3 +1075,140 @@ class TestAcquireNoJWSTData:
         mock_mast.return_value = []
         with pytest.raises(TargetNotFoundError, match="no JWST Level 3"):
             acquire("SomeObscureTarget")
+
+
+class TestQuietStdoutRestore:
+    def test_restores_after_normal_exit(self):
+        from parallax.acquisition import _quiet_stdout
+        orig = sys.stdout
+        with _quiet_stdout():
+            pass
+        assert sys.stdout is orig
+
+    def test_restores_after_exception(self):
+        from parallax.acquisition import _quiet_stdout
+        orig = sys.stdout
+        with pytest.raises(ValueError):
+            with _quiet_stdout():
+                raise ValueError("boom")
+        assert sys.stdout is orig
+
+    def test_restores_after_keyboard_interrupt(self):
+        from parallax.acquisition import _quiet_stdout
+        orig = sys.stdout
+        with pytest.raises(KeyboardInterrupt):
+            with _quiet_stdout():
+                raise KeyboardInterrupt
+        assert sys.stdout is orig
+
+
+class TestCacheKeyIncludesFilterSize:
+    def test_filter_size_changes_hash(self, tmp_db):
+        from parallax.survey import _fits_hash
+        from parallax.config import config
+
+        path = os.path.join(tmp_db, "test_hash.fits")
+        hdul = make_fits()
+        hdul.writeto(path, overwrite=True)
+
+        config.set("detection.background_filter_size", 3)
+        h1 = _fits_hash(path, 3.0, 25, 2.0)
+
+        config.set("detection.background_filter_size", 5)
+        h2 = _fits_hash(path, 3.0, 25, 2.0)
+
+        assert h1 != h2, "changing background_filter_size must change cache key"
+
+    def test_interp_changes_hash(self, tmp_db):
+        from parallax.survey import _fits_hash
+        from parallax.config import config
+
+        path = os.path.join(tmp_db, "test_hash2.fits")
+        hdul = make_fits()
+        hdul.writeto(path, overwrite=True)
+
+        config.set("detection.background_interp", "zoom")
+        h1 = _fits_hash(path, 3.0, 25, 2.0)
+
+        config.set("detection.background_interp", "idw")
+        h2 = _fits_hash(path, 3.0, 25, 2.0)
+
+        assert h1 != h2
+
+
+class TestCatalogMatchDataRoundTrip:
+    def test_empty_string_data(self):
+        from parallax.types import report_from_dict
+        d = _make_report_dict(data="")
+        rpt = report_from_dict(d)
+        assert rpt.candidates[0].catalog_matches[0].data == {}
+
+    def test_none_data(self):
+        from parallax.types import report_from_dict
+        d = _make_report_dict(data=None)
+        rpt = report_from_dict(d)
+        assert rpt.candidates[0].catalog_matches[0].data == {}
+
+    def test_missing_data_key(self):
+        from parallax.types import report_from_dict
+        d = _make_report_dict(data=None)
+        del d["candidates"][0]["catalog_matches"][0]["data"]
+        rpt = report_from_dict(d)
+        assert rpt.candidates[0].catalog_matches[0].data == {}
+
+    def test_valid_dict_data(self):
+        from parallax.types import report_from_dict
+        d = _make_report_dict(data={"velocity": 42.0})
+        rpt = report_from_dict(d)
+        assert rpt.candidates[0].catalog_matches[0].data == {"velocity": 42.0}
+
+    def test_safe_json_dict_empty_string(self):
+        from parallax.types import _safe_json_dict
+        assert _safe_json_dict("") == {}
+
+    def test_safe_json_dict_null_json(self):
+        from parallax.types import _safe_json_dict
+        assert _safe_json_dict("null") == {}
+
+    def test_safe_json_dict_valid(self):
+        from parallax.types import _safe_json_dict
+        assert _safe_json_dict('{"a": 1}') == {"a": 1}
+
+    def test_safe_json_dict_quoted_empty(self):
+        from parallax.types import _safe_json_dict
+        # double-serialized empty string
+        assert _safe_json_dict('""') == {}
+
+
+def _make_report_dict(data=None):
+    """minimal report dict for serialization tests"""
+    return {
+        "id": "20240101_abcd1234",
+        "target": "test",
+        "instrument": "NIRCAM",
+        "filters": ["F200W"],
+        "created_at": "2024-01-01T00:00:00",
+        "n_sources_detected": 1,
+        "n_catalog_matched": 1,
+        "n_unverified": 0,
+        "candidates": [{
+            "id": "cnd_00000001",
+            "ra": 83.8, "dec": -5.4,
+            "flux": 1.0, "snr": 5.0,
+            "classification": "known",
+            "report_id": "20240101_abcd1234",
+            "pixel_coords": [100.0, 100.0],
+            "created_at": "2024-01-01T00:00:00",
+            "catalog_matches": [{
+                "catalog": "NED",
+                "source_id": "NED 1",
+                "separation_arcsec": 0.5,
+                "object_type": "G",
+                "redshift": 0.01,
+                "data": data,
+            }],
+            "detections": [],
+            "tags": [], "notes": [],
+            "confidence": 0.0,
+        }],
+    }

@@ -7,7 +7,7 @@ from datetime import datetime, UTC
 from astropy.coordinates import SkyCoord
 
 from parallax._db import get_db
-from parallax.types import Candidate, CatalogMatch, Detection, _now_iso
+from parallax.types import Candidate, CatalogMatch, Detection, _now_iso, _safe_json_dict
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _row_to_candidate(row, conn) -> Candidate:
             separation_arcsec=mr["separation_arcsec"] or 0.0,
             object_type=mr["object_type"],
             redshift=mr["redshift"],
-            data=json.loads(mr["data"]) if mr["data"] else {},
+            data=_safe_json_dict(mr["data"]),
         ))
 
     det_rows = conn.execute(
