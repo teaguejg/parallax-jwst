@@ -342,7 +342,10 @@ def get_fits(candidate_id: str) -> str:
 
 
 def get_fits_per_filter(candidate_id: str) -> dict[str, str]:
-    """Return {filter_name: fits_path} for each filter where the candidate was detected."""
+    """Return {filter_name: fits_path} for each filter whose footprint contains the candidate."""
+    import warnings
+    from astropy.wcs import FITSFixedWarning
+
     cand = catalog.get(candidate_id)
     if cand is None:
         raise KeyError(candidate_id)
@@ -353,11 +356,48 @@ def get_fits_per_filter(candidate_id: str) -> dict[str, str]:
             (cand.report_id,)
         ).fetchall()
 
-    result = {}
+    # group paths by filter, preserving order
+    by_filter = {}
     for row in rows:
         filt, path = row["filter"], row["fits_path"]
         if filt and path and os.path.isfile(path):
-            result[filt] = path
+            by_filter.setdefault(filt, []).append(path)
+
+    import math
+    has_coords = not (math.isnan(cand.ra) or math.isnan(cand.dec))
+    coord = SkyCoord(cand.ra, cand.dec, unit="deg") if has_coords else None
+
+    result = {}
+    for filt, paths in by_filter.items():
+        if coord is None or len(paths) == 1:
+            result[filt] = paths[0]
+            continue
+
+        matched = None
+        for path in paths:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FITSFixedWarning)
+                    with fits.open(path) as hdul:
+                        sci = next(
+                            (h for h in hdul if h.data is not None and h.data.ndim == 2),
+                            None,
+                        )
+                        if sci is None:
+                            continue
+                        wcs = WCS(sci.header)
+                        if wcs.footprint_contains(coord):
+                            matched = path
+                            break
+            except Exception:
+                continue
+
+        if matched:
+            result[filt] = matched
+        else:
+            logger.debug("no WCS match for %s filter %s, using first file", candidate_id, filt)
+            result[filt] = paths[0]
+
     return result
 
 

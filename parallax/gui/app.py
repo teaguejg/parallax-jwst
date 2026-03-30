@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         )
 
         self._toolbar = ParallaxToolbar()
+        self._toolbar.setObjectName("ParallaxToolbar")
         self.addToolBar(self._toolbar)
 
         self._log_handler = SessionLogHandler()
@@ -85,18 +86,21 @@ class MainWindow(QMainWindow):
 
         self._reports = ReportsPanel()
         self._reports_dock = QDockWidget("Reports", self)
+        self._reports_dock.setObjectName("Reports")
         self._reports_dock.setWidget(self._reports)
         self._reports_dock.setMinimumWidth(220)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._reports_dock)
 
         self._detail = DetailPanel()
         self._detail_dock = QDockWidget("Detail", self)
+        self._detail_dock.setObjectName("Detail")
         self._detail_dock.setWidget(self._detail)
         self._detail_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._detail_dock)
 
         self._log_bar = LogBar()
         self._log_dock = QDockWidget("Log", self)
+        self._log_dock.setObjectName("Log")
         self._log_dock.setWidget(self._log_bar)
         self._log_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._log_dock)

@@ -1161,14 +1161,37 @@ def _run_fingerprint(target, fits_inputs, snr_threshold, min_pixels, fwhm):
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+def _fmt_ra(ra):
+    h = int(ra / 15)
+    m = int((ra / 15 - h) * 60)
+    s = int(((ra / 15 - h) * 60 - m) * 60)
+    return f"{h:02d}{m:02d}{s:02d}"
+
+
+def _fmt_dec(dec):
+    sign = "+" if dec >= 0 else "-"
+    d = int(abs(dec))
+    m = int((abs(dec) - d) * 60)
+    s = int(((abs(dec) - d) * 60 - m) * 60)
+    return f"{sign}{d:02d}{m:02d}{s:02d}"
+
+
 def reduce(
-    target: str,
+    target: str | None = None,
     instrument: str | None = None,
     filters: list[str] | None = None,
     on_progress: callable | None = None,
+    ra: float | None = None,
+    dec: float | None = None,
 ) -> Report:
     """Full pipeline: acquire -> detect -> resolve -> report."""
-    fits_paths = acquire(target, instrument, filters, on_progress=on_progress)
+    if target is None and (ra is None or dec is None):
+        raise ValueError("target or ra/dec required")
+    if target is None:
+        target = f"J{_fmt_ra(ra)}{_fmt_dec(dec)}"
+
+    fits_paths = acquire(target, instrument, filters, on_progress=on_progress,
+                         ra=ra, dec=dec)
     if on_progress:
         on_progress("acquire", f"{len(fits_paths)} file(s) found")
 

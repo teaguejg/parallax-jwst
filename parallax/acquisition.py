@@ -102,21 +102,7 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
             except Exception:
                 pass
 
-    # move each file into an obs-id subfolder to match on-disk convention
-    paths = []
-    for p in paths_downloaded:
-        p = str(p)
-        if not p.endswith(".fits"):
-            continue
-        fname = os.path.basename(p)
-        obs_id = fname.replace("_i2d.fits", "")
-        obs_dir = os.path.join(dest_dir, obs_id)
-        os.makedirs(obs_dir, exist_ok=True)
-        final = os.path.join(obs_dir, fname)
-        if p != final and os.path.exists(p):
-            os.rename(p, final)
-        paths.append(final)
-    return paths
+    return [str(p) for p in paths_downloaded if str(p).endswith(".fits")]
 
 
 def _get_expected_filenames(obs_rows) -> set[str]:
@@ -167,18 +153,110 @@ def _validate_local_fits(paths):
     return good
 
 
+def _find_local_fits_covering(ra, dec, dl_path):
+    from pathlib import Path
+    from astropy.wcs import WCS
+
+    jwst_root = Path(dl_path) / "mastDownload" / "JWST"
+    if not jwst_root.is_dir():
+        return []
+
+    coord = SkyCoord(ra, dec, unit="deg")
+    matched = []
+    for p in jwst_root.rglob("*_i2d.fits"):
+        if "_t" in p.name:
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FITSFixedWarning)
+                with fits.open(str(p)) as hdul:
+                    try:
+                        sci = hdul["SCI"]
+                    except KeyError:
+                        sci = next(
+                            (h for h in hdul if h.data is not None and h.data.ndim == 2),
+                            None,
+                        )
+                    if sci is None:
+                        continue
+                    wcs = WCS(sci.header)
+                    if wcs.footprint_contains(coord):
+                        matched.append(str(p))
+        except Exception:
+            continue
+
+    if matched:
+        logger.info("found %d local file(s) covering RA=%.4f Dec=%.4f in existing slug dir",
+                    len(matched), ra, dec)
+    return matched
+
+
 def acquire(
-    target: str,
+    target: str | None = None,
     instrument: str | None = None,
     filters: list[str] | None = None,
     max_results: int = 10,
     on_progress: callable | None = None,
+    ra: float | None = None,
+    dec: float | None = None,
 ) -> list[str]:
     """Download Level 3 FITS products from MAST matching target and instrument."""
+    if target is None and (ra is None or dec is None):
+        raise ValueError("target or ra/dec required")
+    if target is None:
+        target = ""
+
     if instrument is None:
         instrument = config.get("mast.instruments")[0]
 
     dl_path = config.get("data.download_path")
+
+    # direct coordinate input -- skip all name resolution
+    if ra is not None and dec is not None:
+        slug = f"coord_{ra:.3f}_{dec:.3f}".replace("-", "m").replace(".", "p")
+        slug_dir = os.path.join(dl_path, "mastDownload", "JWST", slug)
+
+        # check existing slug dirs for files already covering these coords
+        local_covering = _find_local_fits_covering(ra, dec, dl_path)
+        if local_covering:
+            validated = _validate_local_fits(local_covering)
+            if validated:
+                logger.info("reusing %d existing tile(s) covering coordinates",
+                            len(validated))
+                if on_progress:
+                    on_progress("acquire", f"Reusing {len(validated)} cached file(s)")
+                return sorted(validated)
+
+        if on_progress:
+            on_progress("acquire", "Querying MAST...")
+        results = _mast_query(ra, dec, instrument, filters, max_results)
+        if len(results) == 0:
+            raise TargetNotFoundError(
+                f"no JWST Level 3 data found at RA={ra}, Dec={dec}"
+            )
+
+        if os.path.isdir(slug_dir):
+            from pathlib import Path
+            local = [str(p) for p in Path(slug_dir).rglob("*_i2d.fits")
+                     if "_t" not in p.name]
+            local = _validate_local_fits(local)
+            if local:
+                expected = _get_expected_filenames(results)
+                local_names = {os.path.basename(p) for p in local}
+                if expected and local_names >= expected:
+                    logger.info("cache complete (%d file(s)), skipping download",
+                                len(local))
+                    return sorted(local)
+                elif expected:
+                    logger.info("cache incomplete (%d/%d), downloading missing files",
+                                len(local), len(expected))
+                else:
+                    logger.info("could not verify cache completeness, re-downloading")
+
+        paths = _mast_download(results, slug_dir, on_progress=on_progress)
+        if not paths:
+            raise RuntimeError("download completed but no FITS files found")
+        return paths
 
     slug = _target_slug(target)
     canonical_slug = slug

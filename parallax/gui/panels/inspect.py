@@ -23,7 +23,7 @@ from astropy.io import fits
 from astropy.nddata import Cutout2D
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS, FITSFixedWarning
-from astropy.visualization import AsinhStretch, ImageNormalize, ZScaleInterval
+from astropy.visualization import AsinhStretch, ImageNormalize, ZScaleInterval, make_lupton_rgb
 import astropy.units as u
 
 import parallax
@@ -79,23 +79,23 @@ def _border_median(data, width=3):
     return float(np.nanmedian(vals))
 
 
-def _auto_colors(sorted_filters):
-    """Assign default colors based on wavelength: blue(short) to red(long)."""
+def _palette_chromatic(sorted_filters):
+    """STScI chromatic ordering: blue(short) to red(long) via HSV interpolation."""
     n = len(sorted_filters)
     if n == 0:
         return {}
     if n == 1:
         return {sorted_filters[0]: (1.0, 1.0, 1.0)}
-    if n == 2:
-        return {sorted_filters[0]: (0.0, 0.0, 1.0),
-                sorted_filters[1]: (1.0, 0.0, 0.0)}
     colors = {}
     for i, filt in enumerate(sorted_filters):
-        # hue from 0.67 (blue) down to 0.0 (red)
         hue = 0.67 * (1.0 - i / (n - 1))
-        r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
         colors[filt] = (r, g, b)
     return colors
+
+
+def _auto_colors(sorted_filters):
+    return _palette_chromatic(sorted_filters)
 
 
 def _is_narrowband(filt):
@@ -103,24 +103,55 @@ def _is_narrowband(filt):
 
 
 def _palette_hubble(sorted_filters):
+    """Classic Hubble palette from HST ACS/WFC3 composite conventions."""
+    blue = (0.18, 0.45, 0.90)
+    green = (0.20, 0.85, 0.30)
+    red = (0.90, 0.18, 0.08)
     n = len(sorted_filters)
     if n == 0:
         return {}
     if n == 1:
         return {sorted_filters[0]: (1.0, 1.0, 1.0)}
     if n == 2:
-        return {sorted_filters[0]: (0.18, 0.35, 0.85),
-                sorted_filters[1]: (0.85, 0.20, 0.10)}
-    colors = {sorted_filters[0]: (0.18, 0.35, 0.85),
-              sorted_filters[1]: (0.25, 0.85, 0.35),
-              sorted_filters[2]: (0.85, 0.20, 0.10)}
-    # extra filters interpolate green to red
+        return {sorted_filters[0]: blue, sorted_filters[1]: red}
+    colors = {sorted_filters[0]: blue,
+              sorted_filters[1]: green,
+              sorted_filters[2]: red}
     for i in range(3, n):
         t = (i - 2) / (n - 2)
-        r = 0.25 + t * (0.85 - 0.25)
-        g = 0.85 + t * (0.20 - 0.85)
-        b = 0.35 + t * (0.10 - 0.35)
+        r = green[0] + t * (red[0] - green[0])
+        g = green[1] + t * (red[1] - green[1])
+        b = green[2] + t * (red[2] - green[2])
         colors[sorted_filters[i]] = (r, g, b)
+    return colors
+
+
+def _palette_emission(sorted_filters):
+    """Nebular emission: desaturated broadband, vivid narrowband."""
+    n = len(sorted_filters)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {sorted_filters[0]: (1.0, 1.0, 1.0)}
+    colors = {}
+    bb = [f for f in sorted_filters if not _is_narrowband(f)]
+    bb_count = len(bb)
+    bb_idx = 0
+    for filt in sorted_filters:
+        if _is_narrowband(filt):
+            wl = _FILTER_WL.get(filt.upper(), 999.0)
+            if wl < 2.5:
+                colors[filt] = (0.0, 0.9, 0.85)
+            else:
+                colors[filt] = (0.85, 0.1, 0.75)
+        else:
+            if bb_count <= 1:
+                hue = 0.33
+            else:
+                hue = 0.67 * (1.0 - bb_idx / (bb_count - 1))
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.5, 1.0)
+            colors[filt] = (r, g, b)
+            bb_idx += 1
     return colors
 
 
@@ -160,10 +191,58 @@ def _palette_warm_dust(sorted_filters):
     return colors
 
 
+def _palette_stellar(sorted_filters):
+    n = len(sorted_filters)
+    if n == 0:
+        return {}
+    short = (0.85, 0.90, 1.0)
+    mid = (1.0, 1.0, 1.0)
+    long = (1.0, 0.75, 0.15)
+    if n == 1:
+        return {sorted_filters[0]: short}
+    colors = {}
+    for i, filt in enumerate(sorted_filters):
+        t = i / (n - 1)
+        if t <= 0.5:
+            s = t / 0.5
+            rgb = tuple(a + s * (b - a) for a, b in zip(short, mid))
+        else:
+            s = (t - 0.5) / 0.5
+            rgb = tuple(a + s * (b - a) for a, b in zip(mid, long))
+        colors[filt] = rgb
+    return colors
+
+
+def _palette_infrared(sorted_filters):
+    n = len(sorted_filters)
+    if n == 0:
+        return {}
+    short = (0.10, 0.15, 0.70)
+    mid = (0.75, 0.10, 0.65)
+    long = (1.0, 0.95, 0.90)
+    if n == 1:
+        return {sorted_filters[0]: short}
+    colors = {}
+    for i, filt in enumerate(sorted_filters):
+        t = i / (n - 1)
+        if t <= 0.5:
+            s = t / 0.5
+            rgb = tuple(a + s * (b - a) for a, b in zip(short, mid))
+        else:
+            s = (t - 0.5) / 0.5
+            rgb = tuple(a + s * (b - a) for a, b in zip(mid, long))
+        colors[filt] = rgb
+    return colors
+
+
 _PALETTES = {
+    "Chromatic": _palette_chromatic,
     "Hubble": _palette_hubble,
+    "Emission": _palette_emission,
     "Molecular H2": _palette_h2,
     "Warm Dust": _palette_warm_dust,
+    "Stellar": _palette_stellar,
+    "Infrared": _palette_infrared,
 }
 
 
@@ -279,6 +358,7 @@ class ColorPickerPanel(QWidget):
         self._val = 1.0
         self._current_filt = None
         self._on_change = None
+        self._on_alpha_change = None
         self._updating = False
 
         lay = QVBoxLayout(self)
@@ -314,12 +394,15 @@ class ColorPickerPanel(QWidget):
         form.addRow("H", self._spin_h)
         form.addRow("S", self._spin_s)
         form.addRow("V", self._spin_v)
+        self._spin_a = QSpinBox(); self._spin_a.setRange(0, 100)
+        form.addRow("A", self._spin_a)
         lay.addLayout(form)
 
         for sp in (self._spin_r, self._spin_g, self._spin_b):
             sp.valueChanged.connect(self._on_rgb_spin)
         for sp in (self._spin_h, self._spin_s, self._spin_v):
             sp.valueChanged.connect(self._on_hsv_spin)
+        self._spin_a.valueChanged.connect(self._on_alpha_spin)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -337,6 +420,14 @@ class ColorPickerPanel(QWidget):
 
     def set_on_change(self, callback):
         self._on_change = callback
+
+    def set_on_alpha_change(self, callback):
+        self._on_alpha_change = callback
+
+    def set_alpha(self, value):
+        self._spin_a.blockSignals(True)
+        self._spin_a.setValue(value)
+        self._spin_a.blockSignals(False)
 
     def _emit(self):
         if self._on_change and self._current_filt:
@@ -373,6 +464,12 @@ class ColorPickerPanel(QWidget):
         self._val = self._spin_v.value() / 100.0
         self._sync_all()
         self._emit()
+
+    def _on_alpha_spin(self, val):
+        if self._updating:
+            return
+        if self._on_alpha_change and self._current_filt:
+            self._on_alpha_change(self._current_filt, val)
 
     def _sync_all(self):
         self._updating = True
@@ -415,7 +512,9 @@ class InspectWindow(QDialog):
         self._filter_enabled = {}
         self._color_buttons = {}
         self._filter_checkboxes = {}
+        self._filter_alphas = {}
         self._active_picker_filt = None
+        self._custom_colors = {}
 
         self._outer = QHBoxLayout(self)
 
@@ -473,6 +572,7 @@ class InspectWindow(QDialog):
 
         self._color_picker = ColorPickerPanel()
         self._color_picker.set_on_change(self._on_picker_change)
+        self._color_picker.set_on_alpha_change(self._on_picker_alpha_change)
         self._color_picker.hide()
         self._outer.addWidget(self._color_picker, stretch=0)
 
@@ -517,8 +617,8 @@ class InspectWindow(QDialog):
                 "Color mapping is approximate, fewer than 3 filters detected."
             )
             note.setStyleSheet("color: #888; font-size: 10px;")
-            # insert after header (0) and controls (1)
-            insert_idx = 2 if self._controls_row else 1
+            # insert after header (0), ctrl row (1), ctrl2 row (2)
+            insert_idx = 3 if self._controls_row else 1
             self._root.insertWidget(insert_idx, note)
 
         self._rebuild_composite()
@@ -541,7 +641,7 @@ class InspectWindow(QDialog):
             self._strip_canvas.hide()
             return
 
-        size = config.get("detection.cutout_size", 60)
+        size = config.get("detection.cutout_size", 80)
         coord = SkyCoord(self._candidate.ra, self._candidate.dec, unit="deg")
 
         cutouts = {}
@@ -553,7 +653,8 @@ class InspectWindow(QDialog):
                         continue
                     wcs = WCS(sci.header)
                     data = sci.data.astype(np.float64)
-                    cut = Cutout2D(data, coord, size * u.pixel, wcs=wcs)
+                    cut = Cutout2D(data, coord, size * u.pixel, wcs=wcs,
+                                    mode='partial', fill_value=np.nan)
                     sub = cut.data - _border_median(cut.data)
                     if not np.all(np.isnan(sub)):
                         cutouts[filt] = sub
@@ -583,12 +684,14 @@ class InspectWindow(QDialog):
         ctrl = QHBoxLayout()
         self._controls_row = ctrl
 
-        self._filter_colors = _auto_colors(self._sorted_filters)
+        self._filter_colors = _palette_chromatic(self._sorted_filters)
         self._color_buttons = {}
         self._filter_checkboxes = {}
 
         for filt in self._sorted_filters:
             self._filter_enabled[filt] = filt in self._det_snr
+            default_alpha = 100
+            self._filter_alphas[filt] = default_alpha
             cb = QCheckBox()
             cb.setChecked(self._filter_enabled[filt])
             cb.setFixedWidth(18)
@@ -605,38 +708,49 @@ class InspectWindow(QDialog):
 
         ctrl.addStretch()
 
-        ctrl.addWidget(QLabel("Stretch:"))
+        ctrl2 = QHBoxLayout()
+        self._controls_row2 = ctrl2
+
+        ctrl2.addWidget(QLabel("Stretch:"))
         self._stretch_spin = QDoubleSpinBox()
         self._stretch_spin.setRange(0.1, 5.0)
         self._stretch_spin.setSingleStep(0.1)
         self._stretch_spin.setDecimals(1)
         self._stretch_spin.setValue(0.5)
+        self._stretch_spin.setToolTip("Stretch")
         self._stretch_spin.valueChanged.connect(self._rebuild_composite)
-        ctrl.addWidget(self._stretch_spin)
+        ctrl2.addWidget(self._stretch_spin)
 
-        ctrl.addWidget(QLabel("Q:"))
+        ctrl2.addWidget(QLabel("Q:"))
         self._q_spin = QDoubleSpinBox()
         self._q_spin.setRange(1.0, 20.0)
         self._q_spin.setSingleStep(1.0)
         self._q_spin.setDecimals(0)
         self._q_spin.setValue(10.0)
+        self._q_spin.setToolTip("Q")
         self._q_spin.valueChanged.connect(self._rebuild_composite)
-        ctrl.addWidget(self._q_spin)
+        ctrl2.addWidget(self._q_spin)
 
         reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_controls)
-        ctrl.addWidget(reset_btn)
+        ctrl2.addWidget(reset_btn)
 
         self._palette_combo = QComboBox()
-        self._palette_combo.addItem("Custom")
         for name in _PALETTES:
             self._palette_combo.addItem(name)
+        self._palette_combo.addItem("Custom")
         self._palette_combo.setFixedWidth(110)
         self._palette_combo.currentTextChanged.connect(self._on_palette_changed)
-        ctrl.addWidget(self._palette_combo)
+        self._palette_combo.blockSignals(True)
+        self._palette_combo.setCurrentText("Chromatic")
+        self._palette_combo.blockSignals(False)
+        ctrl2.addWidget(self._palette_combo)
+
+        ctrl2.addStretch()
 
         # insert between header (index 0) and splitter (index 1)
         self._root.insertLayout(1, ctrl)
+        self._root.insertLayout(2, ctrl2)
 
     def _apply_btn_style(self, btn, rgb, active=False):
         hex_c = _rgb_to_hex(rgb)
@@ -656,28 +770,55 @@ class InspectWindow(QDialog):
         self._filter_enabled[filt] = self._filter_checkboxes[filt].isChecked()
         self._rebuild_composite()
 
+    def _on_picker_alpha_change(self, filt, val):
+        self._filter_alphas[filt] = val
+        self._rebuild_composite()
+
     def _open_color_picker(self, filt):
         if not self._filter_enabled.get(filt, True):
             return
         if self._color_picker.isVisible() and self._active_picker_filt == filt:
             # toggle off
+            self.resize(self.width() - self._color_picker.width(), self.height())
             self._color_picker.hide()
             self._active_picker_filt = None
             self._update_btn_highlight(None)
             return
         self._active_picker_filt = filt
         self._color_picker.set_filter(filt, self._filter_colors[filt])
+        self._color_picker.set_alpha(self._filter_alphas.get(filt, 100))
+        if not self._color_picker.isVisible():
+            self.resize(self.width() + self._color_picker.width(), self.height())
         self._color_picker.show()
         self._update_btn_highlight(filt)
 
     def _on_picker_change(self, filt, rgb):
         self._filter_colors[filt] = rgb
         self._apply_btn_style(self._color_buttons[filt], rgb)
+        if self._palette_combo.currentText() != "Custom":
+            self._palette_combo.blockSignals(True)
+            self._palette_combo.setCurrentText("Custom")
+            self._palette_combo.blockSignals(False)
         self._rebuild_composite()
 
     def _on_palette_changed(self, name):
         if name == "Custom":
+            # restore saved custom colors if available
+            if self._custom_colors:
+                for filt in self._sorted_filters:
+                    if filt in self._custom_colors:
+                        self._filter_colors[filt] = self._custom_colors[filt]
+                for filt, btn in self._color_buttons.items():
+                    self._apply_btn_style(btn, self._filter_colors[filt],
+                                          active=(filt == self._active_picker_filt))
+                if self._color_picker.isVisible():
+                    f = self._color_picker._current_filt
+                    if f and f in self._filter_colors:
+                        self._color_picker.set_filter(f, self._filter_colors[f])
+                self._rebuild_composite()
             return
+        # save current colors as custom before overwriting
+        self._custom_colors = dict(self._filter_colors)
         fn = _PALETTES.get(name)
         if not fn:
             return
@@ -688,32 +829,38 @@ class InspectWindow(QDialog):
         for filt, btn in self._color_buttons.items():
             self._apply_btn_style(btn, self._filter_colors[filt],
                                   active=(filt == self._active_picker_filt))
+        for f in self._sorted_filters:
+            self._filter_alphas[f] = 100
         if self._color_picker.isVisible():
             f = self._color_picker._current_filt
             if f and f in self._filter_colors:
                 self._color_picker.set_filter(f, self._filter_colors[f])
+            if f:
+                self._color_picker.set_alpha(100)
         self._rebuild_composite()
 
     def _reset_controls(self):
-        self._filter_colors = _auto_colors(self._sorted_filters)
+        self._filter_colors = _palette_chromatic(self._sorted_filters)
         for filt in self._sorted_filters:
             self._filter_enabled[filt] = filt in self._det_snr
             cb = self._filter_checkboxes[filt]
             cb.blockSignals(True)
             cb.setChecked(self._filter_enabled[filt])
             cb.blockSignals(False)
+            self._filter_alphas[filt] = 100
         for filt, btn in self._color_buttons.items():
             self._apply_btn_style(btn, self._filter_colors[filt],
                                   active=(filt == self._active_picker_filt))
         self._stretch_spin.setValue(0.5)
         self._q_spin.setValue(10.0)
         self._palette_combo.blockSignals(True)
-        self._palette_combo.setCurrentText("Custom")
+        self._palette_combo.setCurrentText("Chromatic")
         self._palette_combo.blockSignals(False)
         if self._color_picker.isVisible():
             f = self._color_picker._current_filt
             if f and f in self._filter_colors:
                 self._color_picker.set_filter(f, self._filter_colors[f])
+                self._color_picker.set_alpha(self._filter_alphas.get(f, 100))
         self._rebuild_composite()
 
     def _rebuild_composite(self):
@@ -728,6 +875,13 @@ class InspectWindow(QDialog):
 
         active = [f for f in self._sorted_filters
                   if self._filter_enabled.get(f, True)]
+
+        # normalize cutout shapes -- edge cutouts may be off by a pixel
+        if active:
+            min_h = min(self._cutouts[f].shape[0] for f in active)
+            min_w = min(self._cutouts[f].shape[1] for f in active)
+            active_cutouts = {f: self._cutouts[f][:min_h, :min_w] for f in active}
+            shape = (min_h, min_w)
 
         interval = ZScaleInterval()
         stretch = AsinhStretch()
@@ -759,11 +913,11 @@ class InspectWindow(QDialog):
                 weights = {f: 1.0 for f in active}
 
             for filt in active:
-                data = self._cutouts[filt]
+                data = active_cutouts[filt]
                 norm = ImageNormalize(data, interval=interval, stretch=stretch)
                 normed = norm(data)
-                normed = np.nan_to_num(normed, nan=0.0)
-                w = weights[filt]
+                normed = np.nan_to_num(np.asarray(normed), nan=0.0)
+                w = weights[filt] * (self._filter_alphas.get(filt, 100) / 100.0)
                 cr, cg, cb = self._filter_colors.get(filt, (1.0, 1.0, 1.0))
                 r_plane += normed * cr * w
                 g_plane += normed * cg * w
@@ -773,27 +927,21 @@ class InspectWindow(QDialog):
             g_plane = np.clip(g_plane, 0, 1)
             b_plane = np.clip(b_plane, 0, 1)
 
-            if len(active) <= 3:
-                # direct composite -- lupton suppresses weak channels
-                rgb_raw = np.stack([r_plane, g_plane, b_plane], axis=-1)
-                peak = rgb_raw.max()
-                if peak > 0:
-                    rgb = np.clip(rgb_raw / peak, 0, 1)
-                else:
-                    rgb = rgb_raw
-                gamma = max(0.1, stretch_val)
-                rgb = np.power(rgb, gamma)
-                rgb = (rgb * 255).astype(np.uint8)
-            else:
-                from astropy.visualization import make_lupton_rgb
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
                 rgb = make_lupton_rgb(r_plane, g_plane, b_plane,
                                       stretch=stretch_val, Q=q_val)
 
             ax = self._composite_fig.add_subplot(111)
             ax.imshow(rgb, origin="lower")
 
-            pairs = [f"{f}:{_rgb_to_hex(self._filter_colors[f])}"
-                     for f in active]
+            pairs = []
+            for f in active:
+                s = f"{f}:{_rgb_to_hex(self._filter_colors[f])}"
+                a = self._filter_alphas.get(f, 100)
+                if a != 100:
+                    s += f" a={a}"
+                pairs.append(s)
             ax.set_title("  ".join(pairs), fontsize=7)
             ax.set_axis_off()
 
