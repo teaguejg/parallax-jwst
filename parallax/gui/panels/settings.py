@@ -26,6 +26,7 @@ def _spin_row(spinbox, default):
 class SettingsPanel(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Settings", parent)
+        self.setObjectName("Settings")
         self.setMinimumWidth(320)
 
         scroll = QScrollArea()

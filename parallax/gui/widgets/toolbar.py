@@ -26,7 +26,7 @@ class ParallaxToolbar(QToolBar):
         self.addWidget(QLabel("Target:"))
 
         self.target_input = _TargetInput()
-        self.target_input.setPlaceholderText("e.g. M92")
+        self.target_input.setPlaceholderText("e.g. NGC 3132 or 159.25 -58.633")
         self.target_input.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
         self.target_input.returnPressed.connect(self._on_run_clicked)
         self.addWidget(self.target_input)
