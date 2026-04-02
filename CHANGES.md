@@ -1,5 +1,36 @@
 # Changes
 
+## 1.2.1
+
+- Fixed `flux_mjy` and `mag_ab` never being persisted to the database. The
+  `candidate_detections` table lacked both columns since they were added to the
+  Detection dataclass. The GUI loaded candidates via `catalog.get()` and got
+  None for both fields, showing `-` for every candidate. Added columns to the
+  schema, migration ALTER TABLE statements, INSERT, and SELECT reconstruction.
+- Verified `flux_err`, `flux_mjy_err`, and `mag_ab_err` persistence path is
+  consistent (same INSERT/SELECT fix applied in the same pass).
+- Fixed RuntimeError in `_on_candidate_inspected` when closing a previous
+  InspectWindow whose C++ object was already deleted by `deleteLater()`.
+  The `old.close()` call is now guarded with try/except RuntimeError.
+
+## 1.2.0
+
+- Per-source flux uncertainties propagated from the JWST i2d ERR extension
+  through to Detection and Candidate. When a WHT extension is present,
+  per-pixel variance is weighted (zero-weight pixels contribute nothing).
+- Three new fields on Detection: `flux_err`, `flux_mjy_err`, `mag_ab_err`.
+  Same three fields added to Candidate, populated from the best-SNR detection
+  that has uncertainty data.
+- `flux_mjy_err` is `flux_err * PIXAR_SR`. `mag_ab_err` is
+  `2.5 / ln(10) * flux_mjy_err / flux_mjy`.
+- Markdown report table now includes Flux err and Mag err columns.
+- DetailPanel GUI shows uncertainties inline (e.g. `22.31 +/- 0.0270`).
+- DB schema: `candidate_detections` and `candidates` tables gain `flux_err`,
+  `flux_mjy_err`, `mag_ab_err` columns. Existing databases migrate
+  automatically via ALTER TABLE.
+- JSON report round-trips the new fields cleanly.
+- Caveats section updated to describe ERR/WHT-based uncertainty propagation.
+
 ## 1.1.1
 
 - Fixed stdout redirection in acquisition.py: replaced manual save/restore with

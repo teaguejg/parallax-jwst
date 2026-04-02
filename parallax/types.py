@@ -25,6 +25,9 @@ class Detection:
     pixel_coords: tuple[float, float]
     flux_mjy: float | None = None
     mag_ab: float | None = None
+    flux_err: float | None = None
+    flux_mjy_err: float | None = None
+    mag_ab_err: float | None = None
 
 
 @dataclass
@@ -43,6 +46,9 @@ class Candidate:
     tags: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     confidence: float = 0.0
+    flux_err: float | None = None
+    flux_mjy_err: float | None = None
+    mag_ab_err: float | None = None
 
 
 @dataclass
@@ -134,7 +140,9 @@ def report_to_dict(r: Report) -> dict:
         c["detections"] = [
             {"filter": det["filter"], "flux": det["flux"],
              "snr": det["snr"], "pixel_coords": det["pixel_coords"],
-             "flux_mjy": det.get("flux_mjy"), "mag_ab": det.get("mag_ab")}
+             "flux_mjy": det.get("flux_mjy"), "mag_ab": det.get("mag_ab"),
+             "flux_err": det.get("flux_err"), "flux_mjy_err": det.get("flux_mjy_err"),
+             "mag_ab_err": det.get("mag_ab_err")}
             for det in c.get("detections", [])
         ]
     return d
@@ -164,6 +172,9 @@ def report_from_dict(d: dict) -> Report:
                 snr=det["snr"], pixel_coords=px,
                 flux_mjy=det.get("flux_mjy"),
                 mag_ab=det.get("mag_ab"),
+                flux_err=det.get("flux_err"),
+                flux_mjy_err=det.get("flux_mjy_err"),
+                mag_ab_err=det.get("mag_ab_err"),
             ))
 
         created = cd["created_at"]
@@ -190,6 +201,9 @@ def report_from_dict(d: dict) -> Report:
             tags=cd.get("tags", []),
             notes=cd.get("notes", []),
             confidence=cd.get("confidence", 0.0),
+            flux_err=cd.get("flux_err"),
+            flux_mjy_err=cd.get("flux_mjy_err"),
+            mag_ab_err=cd.get("mag_ab_err"),
         ))
 
     created = d["created_at"]

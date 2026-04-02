@@ -359,6 +359,7 @@ class SkyPanel(QWidget):
         self._scatter_known = None
         self._scatter_other = {}
         self._scatter_bookmarked = None
+        self._scatter_viewed = None
         self._selected_marker = None
         self._view_mode = _MODE_SCATTER
 
@@ -407,6 +408,18 @@ class SkyPanel(QWidget):
                 bm_ras, bm_decs, s=bm_sizes, c="#f1c40f",
                 label="bookmarked", alpha=0.9, edgecolors="#c8a000",
                 linewidth=1.0, zorder=5,
+            )
+
+        vw = [c for c in self._candidates if "viewed" in (c.tags or [])]
+        if vw:
+            vw_ras = [c.ra for c in vw]
+            vw_decs = [c.dec for c in vw]
+            vw_snrs = np.array([c.snr for c in vw])
+            vw_sizes = np.clip(vw_snrs * 8, 20, 60)
+            self._scatter_viewed = self._ax.scatter(
+                vw_ras, vw_decs, s=vw_sizes, c="#27ae60",
+                label="viewed", alpha=0.8, edgecolors="#1e8449",
+                linewidth=0.8, zorder=4,
             )
 
         self._ax.invert_xaxis()
@@ -488,6 +501,22 @@ class SkyPanel(QWidget):
                     self._comp_ax.plot(px, py, 'o', markersize=radius,
                                        markerfacecolor='none', markeredgecolor=color,
                                        markeredgewidth=1.0)
+                except Exception:
+                    continue
+
+            # viewed markers
+            for c in self._candidates:
+                if "viewed" not in (c.tags or []):
+                    continue
+                try:
+                    coord = SkyCoord(c.ra, c.dec, unit="deg")
+                    px, py = self._composite_wcs.world_to_pixel(coord)
+                    px, py = float(px), float(py)
+                    if px < 0 or py < 0 or px >= w or py >= h:
+                        continue
+                    self._comp_ax.plot(px, py, 'o', markersize=5,
+                                       markerfacecolor='none', markeredgecolor='#27ae60',
+                                       markeredgewidth=1.2)
                 except Exception:
                     continue
 
@@ -675,7 +704,7 @@ class SkyPanel(QWidget):
             self._canvas.draw()
         self.candidate_deselected.emit()
 
-    def refresh_bookmarks(self):
+    def refresh_overlays(self):
         from parallax import catalog
         for c in self._candidates:
             fresh = catalog.get(c.id)
@@ -696,6 +725,22 @@ class SkyPanel(QWidget):
                 bm_ras, bm_decs, s=bm_sizes, c="#f1c40f",
                 label="bookmarked", alpha=0.9, edgecolors="#c8a000",
                 linewidth=1.0, zorder=5,
+            )
+
+        if self._scatter_viewed is not None:
+            self._scatter_viewed.remove()
+            self._scatter_viewed = None
+
+        vw = [c for c in self._candidates if "viewed" in (c.tags or [])]
+        if vw:
+            vw_ras = [c.ra for c in vw]
+            vw_decs = [c.dec for c in vw]
+            vw_snrs = np.array([c.snr for c in vw])
+            vw_sizes = np.clip(vw_snrs * 8, 20, 60)
+            self._scatter_viewed = self._ax.scatter(
+                vw_ras, vw_decs, s=vw_sizes, c="#27ae60",
+                label="viewed", alpha=0.8, edgecolors="#1e8449",
+                linewidth=0.8, zorder=4,
             )
 
         self._ax.legend(fontsize=8, loc="upper right")
@@ -736,6 +781,7 @@ class SkyPanel(QWidget):
         self._candidates = []
         self._scatter_known = None
         self._scatter_bookmarked = None
+        self._scatter_viewed = None
         self._scatter_other = {}
         self._selected_marker = None
         self._canvas.draw()

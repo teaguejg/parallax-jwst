@@ -136,7 +136,7 @@ class MainWindow(QMainWindow):
         self._sky.candidate_deselected.connect(self._detail.show_hint)
         self._detail.candidate_closed.connect(self._sky.deselect)
         self._sky.candidate_inspected.connect(self._on_candidate_inspected)
-        self._detail.candidate_updated.connect(self._sky.refresh_bookmarks)
+        self._detail.candidate_updated.connect(self._sky.refresh_overlays)
         self._toolbar.search_requested.connect(self._on_search)
         self._reports.report_selected.connect(self._on_report_selected)
         self._reports.report_deleted.connect(self._on_report_deleted)
@@ -202,7 +202,10 @@ class MainWindow(QMainWindow):
         self._inspect_windows.append(win)
         if len(self._inspect_windows) > 3:
             old = self._inspect_windows.pop(0)
-            old.close()
+            try:
+                old.close()
+            except RuntimeError:
+                pass  # C++ object already deleted via deleteLater
         win.show()
 
     def _show_settings(self):

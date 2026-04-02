@@ -1212,3 +1212,256 @@ def _make_report_dict(data=None):
             "confidence": 0.0,
         }],
     }
+
+
+class TestFluxUncertainty:
+    def test_err_extension_produces_flux_err(self, tmp_db):
+        hdul = make_fits(n_sources=3, noise=0.05, include_err=True, pixar_sr=2.35e-14)
+        path = _write_fits(hdul, tmp_db)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        assert len(results) >= 1
+        for s in results:
+            assert s["flux_err"] is not None
+            assert s["flux_err"] > 0
+            assert s["flux_mjy_err"] is not None
+            assert s["mag_ab_err"] is not None
+
+    def test_err_and_wht_extensions(self, tmp_db):
+        hdul = make_fits(n_sources=3, noise=0.05, include_err=True,
+                         include_wht=True, pixar_sr=2.35e-14)
+        path = _write_fits(hdul, tmp_db)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        assert len(results) >= 1
+        for s in results:
+            assert s["flux_err"] is not None
+            assert s["flux_err"] > 0
+
+    def test_no_err_extension_leaves_none(self, tmp_db):
+        hdul = make_fits(n_sources=3, noise=0.05)
+        path = _write_fits(hdul, tmp_db)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        assert len(results) >= 1
+        for s in results:
+            assert s["flux_err"] is None
+            assert s["flux_mjy_err"] is None
+            assert s["mag_ab_err"] is None
+
+    def test_mag_ab_err_formula(self):
+        """mag_ab_err = 2.5 / ln(10) * flux_mjy_err / flux_mjy"""
+        flux_mjy = 1e-6
+        flux_mjy_err = 1e-7
+        expected = 2.5 / math.log(10) * flux_mjy_err / flux_mjy
+        # survey rounds to 4 decimal places
+        rounded = round(expected, 4)
+        assert abs(rounded - expected) < 5e-5
+        assert rounded > 0
+
+    def test_no_pixar_sr_no_mjy_err(self, tmp_db):
+        hdul = make_fits(n_sources=3, noise=0.05, include_err=True)
+        # no PIXAR_SR in header
+        path = _write_fits(hdul, tmp_db)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        for s in results:
+            # flux_err should still be set (raw instrumental)
+            assert s["flux_err"] is not None
+            # but mjy and mag err need PIXAR_SR
+            assert s["flux_mjy_err"] is None
+            assert s["mag_ab_err"] is None
+
+
+class TestMarkdownUncertaintyCols:
+    def test_table_has_err_columns(self, tmp_db):
+        from parallax.survey import _write_markdown
+        from parallax.types import Detection
+
+        cand = Candidate(
+            id="cnd_err_test1", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_err", confidence=0.7,
+            pixel_coords=(100.0, 100.0), created_at=datetime(2026, 1, 1),
+            detections=[Detection(filter="F200W", flux=500.0, snr=15.0,
+                                  pixel_coords=(100.0, 100.0),
+                                  flux_mjy=1.17e-8, mag_ab=22.31,
+                                  flux_err=12.5, flux_mjy_err=2.9e-10,
+                                  mag_ab_err=0.027)],
+            flux_err=12.5, flux_mjy_err=2.9e-10, mag_ab_err=0.027,
+        )
+        rpt = Report(
+            id="rpt_err", target="ErrTest", instrument="NIRCAM",
+            filters=["F200W"], created_at=datetime(2026, 1, 1),
+            candidates=[cand],
+            n_sources_detected=1, n_catalog_matched=0, n_unverified=1,
+        )
+        md_path = os.path.join(tmp_db, "reports", "err_test.md")
+        _write_markdown(rpt, md_path, include_known=False)
+        with open(md_path) as f:
+            content = f.read()
+        assert "Flux err" in content
+        assert "Mag err" in content
+        assert "2.9000e-10" in content
+        assert "0.0270" in content
+
+    def test_table_dashes_when_no_err(self, tmp_db):
+        from parallax.survey import _write_markdown
+        from parallax.types import Detection
+
+        cand = Candidate(
+            id="cnd_noerr01", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_noerr", confidence=0.7,
+            pixel_coords=(100.0, 100.0), created_at=datetime(2026, 1, 1),
+            detections=[Detection(filter="F200W", flux=500.0, snr=15.0,
+                                  pixel_coords=(100.0, 100.0),
+                                  flux_mjy=1.17e-8, mag_ab=22.31)],
+        )
+        rpt = Report(
+            id="rpt_noerr", target="NoErrTest", instrument="NIRCAM",
+            filters=["F200W"], created_at=datetime(2026, 1, 1),
+            candidates=[cand],
+            n_sources_detected=1, n_catalog_matched=0, n_unverified=1,
+        )
+        md_path = os.path.join(tmp_db, "reports", "noerr_test.md")
+        _write_markdown(rpt, md_path, include_known=False)
+        with open(md_path) as f:
+            content = f.read()
+        # err columns present but values are dashes
+        assert "Flux err" in content
+        # the row should have dash for err values
+        lines = [l for l in content.split("\n") if "cnd_noerr01" in l]
+        assert len(lines) == 1
+        parts = lines[0].split("|")
+        # flux err col and mag err col should be '-'
+        assert parts[8].strip() == "-"
+        assert parts[10].strip() == "-"
+
+
+class TestJsonRoundTripUncertainty:
+    def test_detection_uncertainty_survives_roundtrip(self):
+        from parallax.types import report_to_dict, report_from_dict, Detection
+
+        det = Detection(filter="F200W", flux=500.0, snr=15.0,
+                        pixel_coords=(100.0, 100.0),
+                        flux_mjy=1.17e-8, mag_ab=22.31,
+                        flux_err=12.5, flux_mjy_err=2.9e-10, mag_ab_err=0.027)
+        cand = Candidate(
+            id="cnd_rt_err01", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_rt",
+            pixel_coords=(100.0, 100.0), created_at=datetime(2026, 1, 1),
+            detections=[det],
+            flux_err=12.5, flux_mjy_err=2.9e-10, mag_ab_err=0.027,
+        )
+        rpt = Report(
+            id="rpt_rt", target="RoundTrip", instrument="NIRCAM",
+            filters=["F200W"], created_at=datetime(2026, 1, 1),
+            candidates=[cand],
+            n_sources_detected=1, n_catalog_matched=0, n_unverified=1,
+        )
+        d = report_to_dict(rpt)
+        # check dict has the fields
+        cd = d["candidates"][0]
+        assert cd["flux_err"] == 12.5
+        assert cd["flux_mjy_err"] == 2.9e-10
+        assert cd["mag_ab_err"] == 0.027
+        dd = cd["detections"][0]
+        assert dd["flux_err"] == 12.5
+        assert dd["flux_mjy_err"] == 2.9e-10
+        assert dd["mag_ab_err"] == 0.027
+
+        # round-trip through JSON
+        rpt2 = report_from_dict(json.loads(json.dumps(d)))
+        c2 = rpt2.candidates[0]
+        assert c2.flux_err == 12.5
+        assert c2.flux_mjy_err == 2.9e-10
+        assert c2.mag_ab_err == 0.027
+        d2 = c2.detections[0]
+        assert d2.flux_err == 12.5
+        assert d2.flux_mjy_err == 2.9e-10
+        assert d2.mag_ab_err == 0.027
+
+    def test_none_uncertainty_roundtrip(self):
+        from parallax.types import report_to_dict, report_from_dict, Detection
+
+        det = Detection(filter="F200W", flux=500.0, snr=15.0,
+                        pixel_coords=(100.0, 100.0))
+        cand = Candidate(
+            id="cnd_rt_none1", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_rt2",
+            pixel_coords=(100.0, 100.0), created_at=datetime(2026, 1, 1),
+            detections=[det],
+        )
+        rpt = Report(
+            id="rpt_rt2", target="RoundTrip2", instrument="NIRCAM",
+            filters=["F200W"], created_at=datetime(2026, 1, 1),
+            candidates=[cand],
+            n_sources_detected=1, n_catalog_matched=0, n_unverified=1,
+        )
+        d = report_to_dict(rpt)
+        rpt2 = report_from_dict(json.loads(json.dumps(d)))
+        c2 = rpt2.candidates[0]
+        assert c2.flux_err is None
+        assert c2.detections[0].flux_err is None
+
+
+class TestDbRoundTripPhotometry:
+    """flux_mjy, mag_ab, and uncertainty fields survive DB add/get."""
+
+    def test_all_photometry_fields_persisted(self, tmp_db):
+        from parallax.types import Detection
+        from parallax import catalog
+
+        det = Detection(filter="F200W", flux=500.0, snr=15.0,
+                        pixel_coords=(100.0, 100.0),
+                        flux_mjy=1.17e-8, mag_ab=22.31,
+                        flux_err=12.5, flux_mjy_err=2.9e-10, mag_ab_err=0.027)
+        cand = Candidate(
+            id="cnd_dbrt0001", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_dbrt",
+            pixel_coords=(100.0, 100.0), created_at=datetime.now(UTC),
+            detections=[det],
+            flux_err=12.5, flux_mjy_err=2.9e-10, mag_ab_err=0.027,
+        )
+        catalog.add(cand)
+        loaded = catalog.get(cand.id)
+
+        # candidate-level uncertainty
+        assert loaded.flux_err == 12.5
+        assert loaded.flux_mjy_err == 2.9e-10
+        assert loaded.mag_ab_err == 0.027
+
+        # detection-level: flux_mjy and mag_ab (bug 1)
+        d = loaded.detections[0]
+        assert d.flux_mjy == 1.17e-8
+        assert d.mag_ab == 22.31
+
+        # detection-level: uncertainty (bug 2)
+        assert d.flux_err == 12.5
+        assert d.flux_mjy_err == 2.9e-10
+        assert d.mag_ab_err == 0.027
+
+    def test_none_photometry_fields_persisted(self, tmp_db):
+        from parallax.types import Detection
+        from parallax import catalog
+
+        det = Detection(filter="F200W", flux=500.0, snr=15.0,
+                        pixel_coords=(100.0, 100.0))
+        cand = Candidate(
+            id="cnd_dbrt0002", ra=83.82, dec=-5.39, flux=500.0, snr=15.0,
+            classification="unverified", report_id="rpt_dbrt2",
+            pixel_coords=(100.0, 100.0), created_at=datetime.now(UTC),
+            detections=[det],
+        )
+        catalog.add(cand)
+        loaded = catalog.get(cand.id)
+
+        assert loaded.flux_err is None
+        assert loaded.flux_mjy_err is None
+        assert loaded.mag_ab_err is None
+
+        d = loaded.detections[0]
+        assert d.flux_mjy is None
+        assert d.mag_ab is None
+        assert d.flux_err is None
+        assert d.flux_mjy_err is None
+        assert d.mag_ab_err is None

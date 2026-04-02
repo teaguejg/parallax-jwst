@@ -32,6 +32,14 @@ def init_db():
             "ALTER TABLE reports ADD COLUMN fingerprint TEXT",
             "ALTER TABLE reports ADD COLUMN filters TEXT",
             "ALTER TABLE candidates ADD COLUMN confidence REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE candidates ADD COLUMN flux_err REAL",
+            "ALTER TABLE candidates ADD COLUMN flux_mjy_err REAL",
+            "ALTER TABLE candidates ADD COLUMN mag_ab_err REAL",
+            "ALTER TABLE candidate_detections ADD COLUMN flux_mjy REAL",
+            "ALTER TABLE candidate_detections ADD COLUMN mag_ab REAL",
+            "ALTER TABLE candidate_detections ADD COLUMN flux_err REAL",
+            "ALTER TABLE candidate_detections ADD COLUMN flux_mjy_err REAL",
+            "ALTER TABLE candidate_detections ADD COLUMN mag_ab_err REAL",
         ]:
             try:
                 conn.execute(stmt)
@@ -63,7 +71,10 @@ CREATE TABLE IF NOT EXISTS candidates (
     created_at TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '[]',
     notes TEXT NOT NULL DEFAULT '[]',
-    confidence REAL NOT NULL DEFAULT 0.0
+    confidence REAL NOT NULL DEFAULT 0.0,
+    flux_err REAL,
+    flux_mjy_err REAL,
+    mag_ab_err REAL
 );
 
 CREATE TABLE IF NOT EXISTS catalog_matches (
@@ -160,7 +171,12 @@ CREATE TABLE IF NOT EXISTS candidate_detections (
     flux REAL,
     snr REAL,
     pixel_x REAL,
-    pixel_y REAL
+    pixel_y REAL,
+    flux_mjy REAL,
+    mag_ab REAL,
+    flux_err REAL,
+    flux_mjy_err REAL,
+    mag_ab_err REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidate_detections_candidate

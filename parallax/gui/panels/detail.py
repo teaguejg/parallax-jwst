@@ -77,6 +77,17 @@ class DetailPanel(QWidget):
         bm_btn.clicked.connect(lambda: self._toggle_bookmark(candidate_id, is_bookmarked))
         close_row.addWidget(bm_btn)
 
+        is_viewed = "viewed" in (cand.tags or [])
+        viewed_btn = QPushButton("Viewed" if is_viewed else "Mark viewed")
+        if is_viewed:
+            viewed_btn.setStyleSheet(
+                "background-color: #27ae60; color: #fff; font-size: 11px; padding: 2px 6px;"
+            )
+        else:
+            viewed_btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        viewed_btn.clicked.connect(lambda: self._toggle_viewed(candidate_id, is_viewed))
+        close_row.addWidget(viewed_btn)
+
         close_btn = QPushButton("X")
         close_btn.setFixedSize(22, 22)
         close_btn.setStyleSheet("font-size: 11px; padding: 0;")
@@ -140,8 +151,18 @@ class DetailPanel(QWidget):
                 tbl.setItem(i, 0, QTableWidgetItem(det.filter))
                 tbl.setItem(i, 1, QTableWidgetItem(f"{det.snr:.2f}"))
                 tbl.setItem(i, 2, QTableWidgetItem(f"{det.flux:.2f}"))
-                fmjy = f"{det.flux_mjy:.3e}" if det.flux_mjy is not None else "-"
-                mab = f"{det.mag_ab:.2f}" if det.mag_ab is not None else "-"
+                if det.flux_mjy is not None:
+                    fmjy = f"{det.flux_mjy:.3e}"
+                    if det.flux_mjy_err is not None:
+                        fmjy += f" +/- {det.flux_mjy_err:.3e}"
+                else:
+                    fmjy = "-"
+                if det.mag_ab is not None:
+                    mab = f"{det.mag_ab:.2f}"
+                    if det.mag_ab_err is not None:
+                        mab += f" +/- {det.mag_ab_err:.4f}"
+                else:
+                    mab = "-"
                 tbl.setItem(i, 3, QTableWidgetItem(fmjy))
                 tbl.setItem(i, 4, QTableWidgetItem(mab))
             self._layout.addWidget(tbl)
@@ -184,6 +205,21 @@ class DetailPanel(QWidget):
                 archive.unbookmark(candidate_id)
             else:
                 archive.bookmark(candidate_id)
+        except Exception:
+            pass
+        self.candidate_updated.emit(self._current_id)
+        self.load(self._current_id)
+
+    def _toggle_viewed(self, candidate_id, currently_viewed):
+        try:
+            from parallax import catalog, archive
+            cand = catalog.get(candidate_id)
+            if cand is None:
+                return
+            if currently_viewed:
+                catalog.update(candidate_id, tags=[t for t in cand.tags if t != "viewed"])
+            else:
+                archive.tag(candidate_id, "viewed")
         except Exception:
             pass
         self.candidate_updated.emit(self._current_id)
