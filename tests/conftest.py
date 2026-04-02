@@ -6,7 +6,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 
-def make_fits(shape=(200, 200), n_sources=3, noise=0.1):
+def make_fits(shape=(200, 200), n_sources=3, noise=0.1,
+              include_err=False, include_wht=False, pixar_sr=None):
     rng = np.random.default_rng(42)
     data = rng.normal(0, noise, shape).astype(np.float32)
 
@@ -27,10 +28,21 @@ def make_fits(shape=(200, 200), n_sources=3, noise=0.1):
     hdr["FILTER"] = "F200W"
     hdr["OBSERVTN"] = "TEST001"
 
-    # mimic JWST i2d layout: empty primary + named SCI extension
     primary = fits.PrimaryHDU()
+    if pixar_sr is not None:
+        primary.header["PIXAR_SR"] = pixar_sr
     sci = fits.ImageHDU(data, header=hdr, name="SCI")
-    return fits.HDUList([primary, sci])
+    extensions = [primary, sci]
+
+    if include_err:
+        err_data = np.abs(rng.normal(noise * 0.5, noise * 0.1, shape)).astype(np.float32)
+        extensions.append(fits.ImageHDU(err_data, name="ERR"))
+
+    if include_wht:
+        wht_data = rng.uniform(0.5, 1.5, shape).astype(np.float32)
+        extensions.append(fits.ImageHDU(wht_data, name="WHT"))
+
+    return fits.HDUList(extensions)
 
 
 @pytest.fixture

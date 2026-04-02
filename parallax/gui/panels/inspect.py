@@ -647,6 +647,26 @@ class InspectWindow(QDialog):
             self._root.insertWidget(insert_idx, note)
 
         self._rebuild_composite()
+        self._strip_fig.canvas.mpl_connect("button_press_event", self._on_strip_click)
+
+    def _on_strip_click(self, event):
+        if event.inaxes is None:
+            return
+        axes = self._strip_fig.axes
+        try:
+            idx = axes.index(event.inaxes)
+        except ValueError:
+            return
+        if idx >= len(self._sorted_filters):
+            return
+        filt = self._sorted_filters[idx]
+        self._filter_enabled[filt] = not self._filter_enabled[filt]
+        cb = self._filter_checkboxes.get(filt)
+        if cb is not None:
+            cb.blockSignals(True)
+            cb.setChecked(self._filter_enabled[filt])
+            cb.blockSignals(False)
+        self._rebuild_composite()
 
     def _extract_cutouts(self):
         from parallax import archive

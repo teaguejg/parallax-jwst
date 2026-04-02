@@ -172,6 +172,19 @@ def detect(
         pixar_sr = hdul[0].header.get("PIXAR_SR", None)
         if pixar_sr is None:
             pixar_sr = sci.header.get("PIXAR_SR", None)
+
+        # load error and weight maps for flux uncertainty
+        err_data = None
+        try:
+            err_data = hdul["ERR"].data.astype(np.float64)
+        except (KeyError, AttributeError):
+            pass
+
+        wht_data = None
+        try:
+            wht_data = hdul["WHT"].data.astype(np.float64)
+        except (KeyError, AttributeError):
+            pass
     finally:
         hdul.close()
 
@@ -305,6 +318,34 @@ def detect(
                 except Exception:
                     mag_ab_val = None
 
+            # flux uncertainty from ERR (and optionally WHT) extensions
+            flux_err_val = None
+            flux_mjy_err_val = None
+            mag_ab_err_val = None
+            if err_data is not None:
+                try:
+                    seg_mask = segmap.data == src.label
+                    err_pixels = err_data[seg_mask]
+                    if wht_data is not None:
+                        w_pixels = wht_data[seg_mask]
+                        # zero-weight pixels contribute zero variance
+                        good = w_pixels > 0
+                        if good.any():
+                            var = np.zeros_like(err_pixels)
+                            var[good] = (err_pixels[good] ** 2) / w_pixels[good]
+                            flux_err_val = float(np.sqrt(np.nansum(var)))
+                    else:
+                        flux_err_val = float(np.sqrt(np.nansum(err_pixels ** 2)))
+
+                    if flux_err_val is not None and flux_err_val > 0:
+                        if pixar_sr is not None and pixar_sr > 0:
+                            flux_mjy_err_val = flux_err_val * float(pixar_sr)
+                        if flux_mjy_err_val and flux_mjy_val and flux_mjy_val > 0:
+                            mag_ab_err_val = round(
+                                2.5 / math.log(10) * flux_mjy_err_val / flux_mjy_val, 4)
+                except Exception:
+                    pass
+
             bb = src.bbox
             d = {
                 "ra": ra_val,
@@ -323,6 +364,9 @@ def detect(
                 },
                 "flux_mjy": flux_mjy_val,
                 "mag_ab": mag_ab_val,
+                "flux_err": flux_err_val,
+                "flux_mjy_err": flux_mjy_err_val,
+                "mag_ab_err": mag_ab_err_val,
                 "local_rms": local_rms,
                 "field_rms": bkg_rms,
             }
@@ -353,7 +397,10 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
                                      "pixel_y": d["pixel_y"],
                                      "flux_source": d.get("flux_source", "kron"),
                                      "flux_mjy": d.get("flux_mjy"),
-                                     "mag_ab": d.get("mag_ab")}]
+                                     "mag_ab": d.get("mag_ab"),
+                                     "flux_err": d.get("flux_err"),
+                                     "flux_mjy_err": d.get("flux_mjy_err"),
+                                     "mag_ab_err": d.get("mag_ab_err")}]
             nan_dets.append(entry)
         else:
             valid.append(d)
@@ -396,6 +443,8 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
                 "pixel_x": d["pixel_x"], "pixel_y": d["pixel_y"],
                 "flux_source": d.get("flux_source", "kron"),
                 "flux_mjy": d.get("flux_mjy"), "mag_ab": d.get("mag_ab"),
+                "flux_err": d.get("flux_err"), "flux_mjy_err": d.get("flux_mjy_err"),
+                "mag_ab_err": d.get("mag_ab_err"),
             })
         merged.append(entry)
 
@@ -750,6 +799,9 @@ def resolve(
                     pixel_coords=(dd["pixel_x"], dd["pixel_y"]),
                     flux_mjy=dd.get("flux_mjy"),
                     mag_ab=dd.get("mag_ab"),
+                    flux_err=dd.get("flux_err"),
+                    flux_mjy_err=dd.get("flux_mjy_err"),
+                    mag_ab_err=dd.get("mag_ab_err"),
                 ))
 
         # narrowband analysis
@@ -807,6 +859,13 @@ def resolve(
         conf = _compute_confidence(det["snr"], n_filt, total_filters, nsep, fsrc,
                                    narrowband_only=nb_only)
 
+        # pick best-SNR detection that has uncertainty
+        _best_err = None
+        for _d in sorted(cand_detections, key=lambda d: d.snr, reverse=True):
+            if _d.flux_err is not None:
+                _best_err = _d
+                break
+
         ex = dedup_map.get(i)
         if ex is not None:
             if _cls_rank.get(cls, 0) > _cls_rank.get(ex.classification, 0):
@@ -815,6 +874,9 @@ def resolve(
             ex.catalog_matches = det_matches
             ex.detections = cand_detections
             ex.confidence = conf
+            ex.flux_err = _best_err.flux_err if _best_err else None
+            ex.flux_mjy_err = _best_err.flux_mjy_err if _best_err else None
+            ex.mag_ab_err = _best_err.mag_ab_err if _best_err else None
             merged_tags = list(ex.tags)
             for t in auto_tags:
                 if t not in merged_tags:
@@ -837,6 +899,9 @@ def resolve(
                 detections=cand_detections,
                 confidence=conf,
                 tags=auto_tags,
+                flux_err=_best_err.flux_err if _best_err else None,
+                flux_mjy_err=_best_err.flux_mjy_err if _best_err else None,
+                mag_ab_err=_best_err.mag_ab_err if _best_err else None,
             )
             candidates.append(cand)
 
@@ -957,7 +1022,7 @@ def report(
                 "crowded_count": sum(1 for c in candidates if "crowded" in c.tags),
                 "near_emission_count": sum(1 for c in candidates if "near_emission" in c.tags),
             },
-            "flux_calibration": "MJy via PIXAR_SR header keyword, no aperture correction",
+            "flux_calibration": "MJy via PIXAR_SR header keyword, uncertainties from ERR/WHT extensions, no aperture correction",
             "input_files": [
                 {"obs_id": oid, "filter": filt, "filename": os.path.basename(path)}
                 for (path, filt), oid in zip(fits_inputs, obs_ids)
@@ -1079,8 +1144,8 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
 
     unverified_by_snr = sorted(unverified, key=lambda c: c.snr, reverse=True)
     lines.append("## Unverified Candidates")
-    lines.append("| ID | RA | Dec | SNR | Confidence | Flux | Flux(MJy) | Mag(AB) |")
-    lines.append("|----|----|-----|-----|------------|------|-----------|---------|")
+    lines.append("| ID | RA | Dec | SNR | Confidence | Flux | Flux(MJy) | Flux err | Mag(AB) | Mag err |")
+    lines.append("|----|----|-----|-----|------------|------|-----------|----------|---------|---------|")
     for c in unverified_by_snr[:md_limit]:
         best_cal = None
         if c.detections:
@@ -1089,8 +1154,10 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
                     best_cal = det
                     break
         fmjy = f"{best_cal.flux_mjy:.4e}" if best_cal and best_cal.flux_mjy is not None else "-"
+        ferr = f"{best_cal.flux_mjy_err:.4e}" if best_cal and best_cal.flux_mjy_err is not None else "-"
         mab = f"{best_cal.mag_ab:.2f}" if best_cal and best_cal.mag_ab is not None else "-"
-        lines.append(f"| {c.id} | {c.ra:.4f} | {c.dec:.4f} | {c.snr:.1f} | {c.confidence:.2f} | {c.flux:.1f} | {fmjy} | {mab} |")
+        merr = f"{best_cal.mag_ab_err:.4f}" if best_cal and best_cal.mag_ab_err is not None else "-"
+        lines.append(f"| {c.id} | {c.ra:.4f} | {c.dec:.4f} | {c.snr:.1f} | {c.confidence:.2f} | {c.flux:.1f} | {fmjy} | {ferr} | {mab} | {merr} |")
     if len(unverified) > md_limit:
         lines.append(f"\n... and {len(unverified) - md_limit} more unverified candidates (see JSON for full list)")
 
@@ -1114,7 +1181,9 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
     lines.append("")
     lines.append("## Caveats")
     lines.append("Flux(MJy) is Kron aperture photometry converted from MJy/sr using the")
-    lines.append("PIXAR_SR header keyword. No aperture correction has been applied.")
+    lines.append("PIXAR_SR header keyword. Flux uncertainties are propagated from the i2d")
+    lines.append("ERR extension (weighted by WHT where available). No aperture correction")
+    lines.append("has been applied.")
     lines.append("Point source fluxes may be underestimated by 10-20% depending on filter")
     lines.append("and source size. Extended source fluxes will be underestimated further.")
     lines.append("Background subtraction in structured emission fields may include nebular")

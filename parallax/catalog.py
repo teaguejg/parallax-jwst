@@ -25,14 +25,16 @@ def add(candidate: Candidate) -> str:
 
         conn.execute(
             "INSERT INTO candidates (id, ra, dec, flux, snr, classification, "
-            "report_id, pixel_x, pixel_y, created_at, tags, notes, confidence) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "report_id, pixel_x, pixel_y, created_at, tags, notes, confidence, "
+            "flux_err, flux_mjy_err, mag_ab_err) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (candidate.id, candidate.ra, candidate.dec, candidate.flux,
              candidate.snr, candidate.classification, candidate.report_id,
              candidate.pixel_coords[0], candidate.pixel_coords[1],
              candidate.created_at.isoformat() if isinstance(candidate.created_at, datetime) else candidate.created_at,
              json.dumps(candidate.tags), json.dumps(candidate.notes),
-             candidate.confidence)
+             candidate.confidence,
+             candidate.flux_err, candidate.flux_mjy_err, candidate.mag_ab_err)
         )
 
         for m in candidate.catalog_matches:
@@ -47,10 +49,13 @@ def add(candidate: Candidate) -> str:
         for det in candidate.detections:
             conn.execute(
                 "INSERT INTO candidate_detections "
-                "(candidate_id, filter, flux, snr, pixel_x, pixel_y) "
-                "VALUES (?,?,?,?,?,?)",
+                "(candidate_id, filter, flux, snr, pixel_x, pixel_y, "
+                "flux_mjy, mag_ab, flux_err, flux_mjy_err, mag_ab_err) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (candidate.id, det.filter, det.flux, det.snr,
-                 det.pixel_coords[0], det.pixel_coords[1])
+                 det.pixel_coords[0], det.pixel_coords[1],
+                 det.flux_mjy, det.mag_ab,
+                 det.flux_err, det.flux_mjy_err, det.mag_ab_err)
             )
 
     return candidate.id
@@ -77,16 +82,30 @@ def _row_to_candidate(row, conn) -> Candidate:
         "SELECT * FROM candidate_detections WHERE candidate_id = ?",
         (row["id"],)
     ).fetchall()
-    detections = [
-        Detection(filter=dr["filter"], flux=dr["flux"], snr=dr["snr"],
-                  pixel_coords=(dr["pixel_x"], dr["pixel_y"]))
-        for dr in det_rows
-    ]
+    detections = []
+    for dr in det_rows:
+        dk = dr.keys()
+        kw = {}
+        if "flux_mjy" in dk:
+            kw["flux_mjy"] = dr["flux_mjy"]
+        if "mag_ab" in dk:
+            kw["mag_ab"] = dr["mag_ab"]
+        if "flux_err" in dk:
+            kw["flux_err"] = dr["flux_err"]
+        if "flux_mjy_err" in dk:
+            kw["flux_mjy_err"] = dr["flux_mjy_err"]
+        if "mag_ab_err" in dk:
+            kw["mag_ab_err"] = dr["mag_ab_err"]
+        detections.append(Detection(
+            filter=dr["filter"], flux=dr["flux"], snr=dr["snr"],
+            pixel_coords=(dr["pixel_x"], dr["pixel_y"]), **kw
+        ))
 
     created = row["created_at"]
     if isinstance(created, str):
         created = datetime.fromisoformat(created)
 
+    keys = row.keys()
     return Candidate(
         id=row["id"],
         ra=row["ra"],
@@ -101,7 +120,10 @@ def _row_to_candidate(row, conn) -> Candidate:
         detections=detections,
         tags=json.loads(row["tags"]) if row["tags"] else [],
         notes=json.loads(row["notes"]) if row["notes"] else [],
-        confidence=row["confidence"] if "confidence" in row.keys() else 0.0,
+        confidence=row["confidence"] if "confidence" in keys else 0.0,
+        flux_err=row["flux_err"] if "flux_err" in keys else None,
+        flux_mjy_err=row["flux_mjy_err"] if "flux_mjy_err" in keys else None,
+        mag_ab_err=row["mag_ab_err"] if "mag_ab_err" in keys else None,
     )
 
 
