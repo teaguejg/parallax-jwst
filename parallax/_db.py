@@ -40,6 +40,8 @@ def init_db():
             "ALTER TABLE candidate_detections ADD COLUMN flux_err REAL",
             "ALTER TABLE candidate_detections ADD COLUMN flux_mjy_err REAL",
             "ALTER TABLE candidate_detections ADD COLUMN mag_ab_err REAL",
+            "ALTER TABLE candidates ADD COLUMN hints TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE candidate_detections ADD COLUMN local_rms REAL",
         ]:
             try:
                 conn.execute(stmt)
@@ -74,7 +76,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     confidence REAL NOT NULL DEFAULT 0.0,
     flux_err REAL,
     flux_mjy_err REAL,
-    mag_ab_err REAL
+    mag_ab_err REAL,
+    hints TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS catalog_matches (
@@ -176,7 +179,8 @@ CREATE TABLE IF NOT EXISTS candidate_detections (
     mag_ab REAL,
     flux_err REAL,
     flux_mjy_err REAL,
-    mag_ab_err REAL
+    mag_ab_err REAL,
+    local_rms REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidate_detections_candidate

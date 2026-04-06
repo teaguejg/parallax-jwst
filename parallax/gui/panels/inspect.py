@@ -558,6 +558,11 @@ class InspectWindow(QDialog):
         self._splitter.setStretchFactor(0, 2)
         self._splitter.setStretchFactor(1, 1)
 
+        if self._candidate.hints:
+            hints_lbl = QLabel(", ".join(self._candidate.hints))
+            hints_lbl.setStyleSheet("color: #888; font-size: 10px;")
+            self._root.addWidget(hints_lbl)
+
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         save_btn = QPushButton("Save")
@@ -1025,12 +1030,44 @@ class InspectWindow(QDialog):
                                     self._candidate.id)
             os.makedirs(save_dir, exist_ok=True)
 
+            import json as _json
             cid = self._candidate.id
             composite_path = os.path.join(save_dir, f"{cid}_composite.png")
             self._composite_fig.savefig(composite_path, dpi=150, bbox_inches="tight")
             self._strip_fig.savefig(
                 os.path.join(save_dir, f"{cid}_strip.png"), dpi=150, bbox_inches="tight"
             )
+
+            stretch = self._stretch_spin.value() if hasattr(self, '_stretch_spin') else 0.5
+            q = self._q_spin.value() if hasattr(self, '_q_spin') else 10.0
+            palette_name = self._palette_combo.currentText() if hasattr(self, '_palette_combo') else "Chromatic"
+
+            # sidecar JSON for composite reproduction
+            sidecar = {
+                "filters": {},
+                "stretch": stretch,
+                "q": q,
+                "palette": palette_name,
+                "parallax_version": parallax.__version__,
+            }
+            for filt in self._sorted_filters:
+                rgb = self._filter_colors.get(filt, (1, 1, 1))
+                sidecar["filters"][filt] = {
+                    "color": _rgb_to_hex(rgb),
+                    "alpha": self._filter_alphas.get(filt, 1.0),
+                }
+            sidecar_path = os.path.join(save_dir, f"{cid}_composite.json")
+            with open(sidecar_path, "w") as f:
+                _json.dump(sidecar, f, indent=2)
+
+            # confidence quality label
+            conf = self._candidate.confidence
+            if conf >= 0.75:
+                quality = "High"
+            elif conf >= 0.50:
+                quality = "Medium"
+            else:
+                quality = "Low"
 
             lines = [
                 f"# Inspection: {self._candidate.id}",
@@ -1045,10 +1082,27 @@ class InspectWindow(QDialog):
                 f"- Report: {self._candidate.report_id}",
                 f"- Parallax: {parallax.__version__}",
                 "",
-                "## Detections",
-                "| Filter | SNR | Flux |",
-                "|--------|-----|------|",
+                "## Properties",
+                f"- Confidence: {conf:.2f} ({quality})",
             ]
+            _AUTO_TAGS = {
+                "narrowband_only", "line_dominated", "compact",
+                "extended", "isolated", "crowded", "near_emission",
+            }
+            auto = [t for t in (self._candidate.tags or []) if t in _AUTO_TAGS]
+            if auto:
+                lines.append(f"- Auto-tags: {', '.join(auto)}")
+            if self._candidate.hints:
+                lines.append(f"- Hints: {', '.join(self._candidate.hints)}")
+            if self._candidate.notes:
+                lines.append("- Notes:")
+                for n in self._candidate.notes:
+                    lines.append(f"  - {n}")
+            lines.append("")
+
+            lines.append("## Detections")
+            lines.append("| Filter | SNR | Flux |")
+            lines.append("|--------|-----|------|")
             dets = sorted(self._candidate.detections, key=lambda d: d.snr, reverse=True)
             for d in dets:
                 lines.append(f"| {d.filter} | {d.snr:.2f} | {d.flux:.2f} |")
@@ -1059,9 +1113,6 @@ class InspectWindow(QDialog):
             lines.append("|---------|-----|--------|------|")
             for m in self._candidate.catalog_matches:
                 lines.append(f"| {m.catalog} | {m.source_id} | {m.separation_arcsec:.2f} | {m.object_type or ''} |")
-
-            stretch = self._stretch_spin.value() if hasattr(self, '_stretch_spin') else 0.5
-            q = self._q_spin.value() if hasattr(self, '_q_spin') else 10.0
 
             lines.extend(["", "## Color Mapping"])
             for filt in self._sorted_filters:

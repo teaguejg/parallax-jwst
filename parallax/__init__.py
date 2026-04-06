@@ -3,4 +3,4 @@ from parallax.config import config
 from parallax.types import Candidate, Detection, Report, Criteria, CutoutView, ViewSession
 from parallax.exceptions import ParallaxError, TargetNotFoundError
 
-__version__ = "1.2.1"
+__version__ = "1.3.1"

@@ -26,15 +26,16 @@ def add(candidate: Candidate) -> str:
         conn.execute(
             "INSERT INTO candidates (id, ra, dec, flux, snr, classification, "
             "report_id, pixel_x, pixel_y, created_at, tags, notes, confidence, "
-            "flux_err, flux_mjy_err, mag_ab_err) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "flux_err, flux_mjy_err, mag_ab_err, hints) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (candidate.id, candidate.ra, candidate.dec, candidate.flux,
              candidate.snr, candidate.classification, candidate.report_id,
              candidate.pixel_coords[0], candidate.pixel_coords[1],
              candidate.created_at.isoformat() if isinstance(candidate.created_at, datetime) else candidate.created_at,
              json.dumps(candidate.tags), json.dumps(candidate.notes),
              candidate.confidence,
-             candidate.flux_err, candidate.flux_mjy_err, candidate.mag_ab_err)
+             candidate.flux_err, candidate.flux_mjy_err, candidate.mag_ab_err,
+             json.dumps(candidate.hints))
         )
 
         for m in candidate.catalog_matches:
@@ -50,12 +51,13 @@ def add(candidate: Candidate) -> str:
             conn.execute(
                 "INSERT INTO candidate_detections "
                 "(candidate_id, filter, flux, snr, pixel_x, pixel_y, "
-                "flux_mjy, mag_ab, flux_err, flux_mjy_err, mag_ab_err) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "flux_mjy, mag_ab, flux_err, flux_mjy_err, mag_ab_err, local_rms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (candidate.id, det.filter, det.flux, det.snr,
                  det.pixel_coords[0], det.pixel_coords[1],
                  det.flux_mjy, det.mag_ab,
-                 det.flux_err, det.flux_mjy_err, det.mag_ab_err)
+                 det.flux_err, det.flux_mjy_err, det.mag_ab_err,
+                 det.local_rms)
             )
 
     return candidate.id
@@ -96,6 +98,8 @@ def _row_to_candidate(row, conn) -> Candidate:
             kw["flux_mjy_err"] = dr["flux_mjy_err"]
         if "mag_ab_err" in dk:
             kw["mag_ab_err"] = dr["mag_ab_err"]
+        if "local_rms" in dk:
+            kw["local_rms"] = dr["local_rms"]
         detections.append(Detection(
             filter=dr["filter"], flux=dr["flux"], snr=dr["snr"],
             pixel_coords=(dr["pixel_x"], dr["pixel_y"]), **kw
@@ -121,6 +125,7 @@ def _row_to_candidate(row, conn) -> Candidate:
         tags=json.loads(row["tags"]) if row["tags"] else [],
         notes=json.loads(row["notes"]) if row["notes"] else [],
         confidence=row["confidence"] if "confidence" in keys else 0.0,
+        hints=json.loads(row["hints"]) if "hints" in keys and row["hints"] else [],
         flux_err=row["flux_err"] if "flux_err" in keys else None,
         flux_mjy_err=row["flux_mjy_err"] if "flux_mjy_err" in keys else None,
         mag_ab_err=row["mag_ab_err"] if "mag_ab_err" in keys else None,
