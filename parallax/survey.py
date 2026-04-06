@@ -281,7 +281,6 @@ def detect(
                 dec_val = float("nan")
 
             peak = float(src.max_value)
-            snr_val = peak / bkg_rms if bkg_rms > 0 else peak
 
             local_rms = None
             if rms_map is not None:
@@ -293,6 +292,9 @@ def detect(
                     local_rms = float(rms_map[px, py])
                 except Exception:
                     local_rms = None
+
+            rms = local_rms if local_rms and local_rms > 0 else bkg_rms
+            snr_val = peak / rms if rms > 0 else peak
 
             try:
                 flux_val = float(src.kron_flux)
@@ -346,6 +348,26 @@ def detect(
                 except Exception:
                     pass
 
+            # morphology properties for hint computation
+            try:
+                elong = float(src.elongation)
+                if math.isnan(elong):
+                    elong = None
+            except Exception:
+                elong = None
+            try:
+                ellip = float(src.ellipticity)
+                if math.isnan(ellip):
+                    ellip = None
+            except Exception:
+                ellip = None
+            try:
+                semimajor = float(src.semimajor_sigma.value)
+                if math.isnan(semimajor):
+                    semimajor = None
+            except Exception:
+                semimajor = None
+
             bb = src.bbox
             d = {
                 "ra": ra_val,
@@ -369,6 +391,9 @@ def detect(
                 "mag_ab_err": mag_ab_err_val,
                 "local_rms": local_rms,
                 "field_rms": bkg_rms,
+                "elongation": elong,
+                "ellipticity": ellip,
+                "semimajor_sigma": semimajor,
             }
             if filter_name is not None:
                 d["filter"] = filter_name
@@ -400,7 +425,10 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
                                      "mag_ab": d.get("mag_ab"),
                                      "flux_err": d.get("flux_err"),
                                      "flux_mjy_err": d.get("flux_mjy_err"),
-                                     "mag_ab_err": d.get("mag_ab_err")}]
+                                     "mag_ab_err": d.get("mag_ab_err"),
+                                     "elongation": d.get("elongation"),
+                                     "semimajor_sigma": d.get("semimajor_sigma"),
+                                     "local_rms": d.get("local_rms")}]
             nan_dets.append(entry)
         else:
             valid.append(d)
@@ -445,6 +473,9 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
                 "flux_mjy": d.get("flux_mjy"), "mag_ab": d.get("mag_ab"),
                 "flux_err": d.get("flux_err"), "flux_mjy_err": d.get("flux_mjy_err"),
                 "mag_ab_err": d.get("mag_ab_err"),
+                "elongation": d.get("elongation"),
+                "semimajor_sigma": d.get("semimajor_sigma"),
+                "local_rms": d.get("local_rms"),
             })
         merged.append(entry)
 
@@ -639,7 +670,7 @@ def _is_narrowband(filter_name):
 
 def _compute_confidence(snr, n_filters, total_filters, nearest_sep_arcsec, flux_source,
                         narrowband_only=False):
-    search_radius = 2.0  # match resolver default
+    search_radius = config.get("resolver.search_radius_arcsec", 2.0)
     snr_score = min(snr, 30.0) / 30.0
     filter_score = n_filters / max(total_filters, 1)
     if nearest_sep_arcsec == float("inf"):
@@ -802,6 +833,7 @@ def resolve(
                     flux_err=dd.get("flux_err"),
                     flux_mjy_err=dd.get("flux_mjy_err"),
                     mag_ab_err=dd.get("mag_ab_err"),
+                    local_rms=dd.get("local_rms"),
                 ))
 
         # narrowband analysis
@@ -1161,6 +1193,27 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
     if len(unverified) > md_limit:
         lines.append(f"\n... and {len(unverified) - md_limit} more unverified candidates (see JSON for full list)")
 
+    # per-candidate annotations: hints and background variance warnings
+    _annotated = []
+    for c in unverified_by_snr[:md_limit]:
+        c_lines = []
+        if c.hints:
+            c_lines.append(f"**{c.id}** - Hints: {', '.join(c.hints)}")
+        # background variance across filters
+        rms_vals = [d.local_rms for d in c.detections if d.local_rms is not None]
+        if len(rms_vals) >= 2:
+            rms_ratio = max(rms_vals) / min(rms_vals) if min(rms_vals) > 0 else 0
+            if rms_ratio > 3.0:
+                c_lines.append(
+                    f"**{c.id} - Background:** RMS varies {rms_ratio:.1f}x across filters"
+                    f" - photometry may be unreliable in structured emission."
+                )
+        if c_lines:
+            _annotated.extend(c_lines)
+    if _annotated:
+        lines.append("")
+        lines.extend(_annotated)
+
     if include_known:
         lines.append("")
         lines.append("## Known")
@@ -1231,6 +1284,71 @@ def _run_fingerprint(target, fits_inputs, snr_threshold, min_pixels, fwhm):
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+_NARROWBAND_FILTERS = frozenset([
+    "F162M", "F164N", "F187N", "F212N", "F323N", "F405N", "F466N", "F470N",
+])
+
+
+def _compute_hints(candidate, det_dicts):
+    """Derive sub-classification hint strings for an unverified candidate."""
+    if candidate.classification != "unverified":
+        return []
+
+    hints = []
+
+    # morphology per filter
+    for dd in det_dicts:
+        filt = dd.get("filter", "UNKNOWN")
+        sm = dd.get("semimajor_sigma")
+        elong = dd.get("elongation")
+        if sm is not None:
+            if sm > 3.0:
+                hints.append(f"extended in {filt}")
+            elif sm <= 1.5 and elong is not None and elong <= 1.3:
+                hints.append(f"point source in {filt}")
+
+    # narrowband-only
+    if det_dicts:
+        filters_present = [dd.get("filter", "UNKNOWN") for dd in det_dicts]
+        all_nb = all(f.upper() in _NARROWBAND_FILTERS for f in filters_present)
+        any_bb = any(f.upper() not in _NARROWBAND_FILTERS for f in filters_present)
+        if all_nb and not any_bb:
+            hints.append("narrowband-only detection")
+
+    # single-filter
+    if len(det_dicts) == 1:
+        hints.append("single-filter detection")
+
+    # F187N excess vs continuum
+    _check_filter_excess(det_dicts, "F187N", ["F182M", "F210M", "F150W", "F200W"],
+                         2.0, "F187N excess vs continuum", hints)
+
+    # F162M excess vs continuum
+    _check_filter_excess(det_dicts, "F162M", ["F150W", "F182M", "F200W"],
+                         2.0, "F162M excess vs continuum", hints)
+
+    return hints
+
+
+def _check_filter_excess(det_dicts, target_filter, ref_order, threshold, label, hints):
+    target_flux = None
+    for dd in det_dicts:
+        if dd.get("filter", "").upper() == target_filter:
+            target_flux = dd.get("flux_mjy")
+            break
+    if target_flux is None or target_flux <= 0:
+        return
+
+    for ref_name in ref_order:
+        for dd in det_dicts:
+            if dd.get("filter", "").upper() == ref_name:
+                ref_flux = dd.get("flux_mjy")
+                if ref_flux is not None and ref_flux > 0:
+                    if target_flux / ref_flux > threshold:
+                        hints.append(label)
+                    return
+
+
 def _fmt_ra(ra):
     h = int(ra / 15)
     m = int((ra / 15 - h) * 60)
@@ -1291,6 +1409,11 @@ def reduce(
     candidates, gaia_flag = resolve(merged)
     if on_progress:
         on_progress("resolve", f"{len(candidates)} candidates")
+
+    # attach sub-classification hints using morphology from merged dicts
+    for cand, mdet in zip(candidates, merged):
+        raw_dets = mdet.get("detections", [mdet])
+        cand.hints = _compute_hints(cand, raw_dets)
 
     rpt = report(candidates, target, fits_inputs, n_total, gaia_failed=gaia_flag)
     if on_progress:

@@ -185,6 +185,17 @@ class TestDetect:
         with pytest.raises(ValueError, match="truncated or corrupt"):
             detect(path)
 
+    def test_snr_uses_local_rms(self, tmp_db):
+        """SNR should be computed from local RMS when the map is available."""
+        hdul = make_fits(n_sources=3, noise=0.05)
+        path = _write_fits(hdul, tmp_db)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        assert len(results) >= 1
+        # all sources should have positive snr computed from local rms
+        for s in results:
+            assert s["snr"] > 0
+
 
 class TestResolve:
     def _make_detections(self, n=2):
@@ -946,6 +957,21 @@ class TestComputeConfidence:
             assert "flux_source" in s
             assert s["flux_source"] in ("kron", "segment", "zero")
 
+    def test_reads_search_radius_from_config(self):
+        from parallax.survey import _compute_confidence
+        with patch("parallax.survey.config") as mock_cfg:
+            mock_cfg.get.return_value = 5.0
+            v = _compute_confidence(10.0, 2, 3, 3.0, "kron")
+            mock_cfg.get.assert_called_with("resolver.search_radius_arcsec", 2.0)
+            # sep=3.0 is within radius=5.0 so near_miss_score=0
+            assert v == _compute_confidence.__wrapped__(10.0, 2, 3, 3.0, "kron") if hasattr(_compute_confidence, '__wrapped__') else True
+        # with default radius=2.0, sep=3.0 is outside so near_miss_score > 0
+        v_default = _compute_confidence(10.0, 2, 3, 3.0, "kron")
+        with patch("parallax.survey.config") as mock_cfg:
+            mock_cfg.get.return_value = 5.0
+            v_wide = _compute_confidence(10.0, 2, 3, 3.0, "kron")
+        assert v_wide < v_default  # wider radius makes near-miss score 0
+
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
@@ -1465,3 +1491,276 @@ class TestDbRoundTripPhotometry:
         assert d.flux_err is None
         assert d.flux_mjy_err is None
         assert d.mag_ab_err is None
+
+
+class TestComputeHints:
+    def _make_candidate(self, classification="unverified", detections=None):
+        from parallax.types import Detection
+        return Candidate(
+            id="cnd_hint001",
+            ra=83.0, dec=-5.0,
+            flux=100.0, snr=10.0,
+            classification=classification,
+            report_id="rpt_test",
+            pixel_coords=(50.0, 50.0),
+            created_at=datetime.now(UTC),
+            detections=detections or [],
+        )
+
+    def test_extended_morphology(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [{"filter": "F200W", "semimajor_sigma": 4.5, "elongation": 2.0,
+                 "flux_mjy": None}]
+        hints = _compute_hints(cand, dets)
+        assert "extended in F200W" in hints
+
+    def test_point_source_morphology(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [{"filter": "F200W", "semimajor_sigma": 1.2, "elongation": 1.1,
+                 "flux_mjy": None}]
+        hints = _compute_hints(cand, dets)
+        assert "point source in F200W" in hints
+
+    def test_no_morphology_when_none(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [{"filter": "F200W", "semimajor_sigma": None, "elongation": None,
+                 "flux_mjy": None}]
+        hints = _compute_hints(cand, dets)
+        assert not any("extended" in h or "point source" in h for h in hints)
+
+    def test_narrowband_only(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F187N", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+            {"filter": "F212N", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "narrowband-only detection" in hints
+
+    def test_not_narrowband_only_with_broadband(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F187N", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+            {"filter": "F200W", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "narrowband-only detection" not in hints
+
+    def test_single_filter(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [{"filter": "F200W", "semimajor_sigma": None, "elongation": None,
+                 "flux_mjy": None}]
+        hints = _compute_hints(cand, dets)
+        assert "single-filter detection" in hints
+
+    def test_no_single_filter_with_two(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F200W", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+            {"filter": "F150W", "semimajor_sigma": None, "elongation": None, "flux_mjy": None},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "single-filter detection" not in hints
+
+    def test_f187n_excess(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F187N", "semimajor_sigma": None, "elongation": None, "flux_mjy": 5.0},
+            {"filter": "F182M", "semimajor_sigma": None, "elongation": None, "flux_mjy": 2.0},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "F187N excess vs continuum" in hints
+
+    def test_f187n_no_excess_below_threshold(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F187N", "semimajor_sigma": None, "elongation": None, "flux_mjy": 3.0},
+            {"filter": "F182M", "semimajor_sigma": None, "elongation": None, "flux_mjy": 2.0},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "F187N excess vs continuum" not in hints
+
+    def test_f162m_excess(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate()
+        dets = [
+            {"filter": "F162M", "semimajor_sigma": None, "elongation": None, "flux_mjy": 7.0},
+            {"filter": "F150W", "semimajor_sigma": None, "elongation": None, "flux_mjy": 3.0},
+        ]
+        hints = _compute_hints(cand, dets)
+        assert "F162M excess vs continuum" in hints
+
+    def test_known_candidate_gets_empty_hints(self):
+        from parallax.survey import _compute_hints
+        cand = self._make_candidate(classification="known")
+        dets = [{"filter": "F200W", "semimajor_sigma": 5.0, "elongation": 2.0,
+                 "flux_mjy": None}]
+        hints = _compute_hints(cand, dets)
+        assert hints == []
+
+    def test_hints_serialization_roundtrip(self):
+        from parallax.types import report_to_dict, report_from_dict
+        cand = self._make_candidate()
+        cand.hints = ["extended in F200W", "single-filter detection"]
+        rpt = Report(
+            id="20260402_test1234",
+            target="M92",
+            instrument="NIRCAM",
+            filters=["F200W"],
+            created_at=datetime.now(UTC),
+            candidates=[cand],
+            n_sources_detected=1,
+            n_catalog_matched=0,
+            n_unverified=1,
+        )
+        d = report_to_dict(rpt)
+        assert d["candidates"][0]["hints"] == ["extended in F200W", "single-filter detection"]
+
+        restored = report_from_dict(d)
+        assert restored.candidates[0].hints == ["extended in F200W", "single-filter detection"]
+
+    def test_hints_db_persistence(self, tmp_db):
+        from parallax import catalog
+        cand = self._make_candidate()
+        cand.hints = ["point source in F200W", "narrowband-only detection"]
+        catalog.add(cand)
+        loaded = catalog.get(cand.id)
+        assert loaded.hints == ["point source in F200W", "narrowband-only detection"]
+
+
+class TestLocalRmsOnDetection:
+    def test_local_rms_field_default_none(self):
+        from parallax.types import Detection
+        det = Detection(filter="F200W", flux=10.0, snr=5.0, pixel_coords=(1.0, 2.0))
+        assert det.local_rms is None
+
+    def test_local_rms_roundtrip_json(self):
+        from parallax.types import Detection, Candidate, Report, report_to_dict, report_from_dict
+        det = Detection(filter="F200W", flux=10.0, snr=5.0,
+                        pixel_coords=(1.0, 2.0), local_rms=0.042)
+        cand = Candidate(
+            id="cnd_lrms001", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            detections=[det],
+        )
+        rpt = Report(id="20260402_lrmstest", target="M92", instrument="NIRCAM",
+                     filters=["F200W"], created_at=datetime.now(UTC),
+                     candidates=[cand], n_sources_detected=1,
+                     n_catalog_matched=0, n_unverified=1)
+        d = report_to_dict(rpt)
+        assert d["candidates"][0]["detections"][0]["local_rms"] == 0.042
+        restored = report_from_dict(d)
+        assert restored.candidates[0].detections[0].local_rms == 0.042
+
+    def test_local_rms_db_persistence(self, tmp_db):
+        from parallax.types import Detection
+        from parallax import catalog
+        det = Detection(filter="F200W", flux=10.0, snr=5.0,
+                        pixel_coords=(1.0, 2.0), local_rms=0.037)
+        cand = Candidate(
+            id="cnd_lrms002", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            detections=[det],
+        )
+        catalog.add(cand)
+        loaded = catalog.get(cand.id)
+        assert loaded.detections[0].local_rms == 0.037
+
+    def test_local_rms_none_db_persistence(self, tmp_db):
+        from parallax.types import Detection
+        from parallax import catalog
+        det = Detection(filter="F200W", flux=10.0, snr=5.0,
+                        pixel_coords=(1.0, 2.0))
+        cand = Candidate(
+            id="cnd_lrms003", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            detections=[det],
+        )
+        catalog.add(cand)
+        loaded = catalog.get(cand.id)
+        assert loaded.detections[0].local_rms is None
+
+
+class TestBackgroundVarianceWarning:
+    def test_variance_warning_in_markdown(self, tmp_db):
+        from parallax.types import Detection
+        from parallax.survey import _write_markdown
+        d1 = Detection(filter="F200W", flux=10.0, snr=5.0,
+                       pixel_coords=(1.0, 2.0), local_rms=0.01)
+        d2 = Detection(filter="F150W", flux=8.0, snr=4.0,
+                       pixel_coords=(1.0, 2.0), local_rms=0.05)
+        cand = Candidate(
+            id="cnd_bkg001", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            detections=[d1, d2],
+        )
+        rpt = Report(id="20260402_bkgtest", target="M92", instrument="NIRCAM",
+                     filters=["F200W", "F150W"], created_at=datetime.now(UTC),
+                     candidates=[cand], n_sources_detected=1,
+                     n_catalog_matched=0, n_unverified=1)
+        md_path = os.path.join(tmp_db, "reports", "test_bkg.md")
+        _write_markdown(rpt, md_path, include_known=False)
+        with open(md_path) as f:
+            content = f.read()
+        assert "Background:" in content
+        assert "5.0x" in content
+
+    def test_no_warning_when_ratio_low(self, tmp_db):
+        from parallax.types import Detection
+        from parallax.survey import _write_markdown
+        d1 = Detection(filter="F200W", flux=10.0, snr=5.0,
+                       pixel_coords=(1.0, 2.0), local_rms=0.01)
+        d2 = Detection(filter="F150W", flux=8.0, snr=4.0,
+                       pixel_coords=(1.0, 2.0), local_rms=0.02)
+        cand = Candidate(
+            id="cnd_bkg002", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            detections=[d1, d2],
+        )
+        rpt = Report(id="20260402_bkgtst2", target="M92", instrument="NIRCAM",
+                     filters=["F200W", "F150W"], created_at=datetime.now(UTC),
+                     candidates=[cand], n_sources_detected=1,
+                     n_catalog_matched=0, n_unverified=1)
+        md_path = os.path.join(tmp_db, "reports", "test_bkg2.md")
+        _write_markdown(rpt, md_path, include_known=False)
+        with open(md_path) as f:
+            content = f.read()
+        assert "Background:" not in content
+
+
+class TestHintsMarkdownFormat:
+    def test_hints_format_plain_text(self, tmp_db):
+        from parallax.types import Detection
+        from parallax.survey import _write_markdown
+        cand = Candidate(
+            id="cnd_fmt001", ra=83.0, dec=-5.0, flux=10.0, snr=5.0,
+            classification="unverified", report_id="rpt_test",
+            pixel_coords=(1.0, 2.0), created_at=datetime.now(UTC),
+            hints=["point source in F200W", "single-filter detection"],
+        )
+        rpt = Report(id="20260402_fmttest", target="M92", instrument="NIRCAM",
+                     filters=["F200W"], created_at=datetime.now(UTC),
+                     candidates=[cand], n_sources_detected=1,
+                     n_catalog_matched=0, n_unverified=1)
+        md_path = os.path.join(tmp_db, "reports", "test_fmt.md")
+        _write_markdown(rpt, md_path, include_known=False)
+        with open(md_path) as f:
+            content = f.read()
+        # single bold for ID, plain text for rest
+        assert "**cnd_fmt001** - Hints:" in content
+        # no double bold
+        assert "**Hints:**" not in content

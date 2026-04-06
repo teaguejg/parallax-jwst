@@ -140,6 +140,11 @@ class DetailPanel(QWidget):
             tags_label.setStyleSheet("color: #888; font-size: 10px;")
             self._layout.addWidget(tags_label)
 
+        if cand.hints:
+            hints_label = QLabel("Hints: " + ", ".join(cand.hints))
+            hints_label.setStyleSheet("color: #888; font-size: 10px;")
+            self._layout.addWidget(hints_label)
+
         if cand.detections:
             self._layout.addWidget(QLabel("Detections"))
             tbl = QTableWidget(len(cand.detections), 5)
