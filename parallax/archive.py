@@ -24,13 +24,15 @@ logger = logging.getLogger(__name__)
 def _normalize_target(name: str) -> str:
     if not name:
         return name
-    # fix common catalog prefixes that get title-cased incorrectly
     prefixes = ["Ngc", "Ic", "Hd", "Hr", "Bd", "Pgc", "Ugc", "Mcg"]
-    parts = name.split()
+    parts = name.strip().split()
     if parts and parts[0] in prefixes:
         parts[0] = parts[0].upper()
-        return " ".join(parts)
-    return name
+    elif parts:
+        lower_prefixes = [p.lower() for p in prefixes]
+        if parts[0].lower() in lower_prefixes:
+            parts[0] = parts[0].upper()
+    return " ".join(parts)
 
 
 def _row_to_report(row, conn) -> Report:
@@ -401,8 +403,8 @@ def get_fits_per_filter(candidate_id: str) -> dict[str, str]:
     return result
 
 
-def get_fits_for_report(report_id: str) -> dict[str, str]:
-    """Return {filter: fits_path} for all inputs of a report that exist on disk."""
+def get_fits_for_report(report_id: str) -> dict[str, list[str]]:
+    """Return {filter: [fits_paths]} for all inputs of a report that exist on disk."""
     with get_db() as conn:
         rows = conn.execute(
             "SELECT filter, fits_path FROM report_inputs WHERE report_id = ? ORDER BY id",
@@ -412,8 +414,8 @@ def get_fits_for_report(report_id: str) -> dict[str, str]:
     result = {}
     for row in rows:
         filt, path = row["filter"], row["fits_path"]
-        if filt and path and filt not in result and os.path.isfile(path):
-            result[filt] = path
+        if filt and path and os.path.isfile(path):
+            result.setdefault(filt, []).append(path)
     return result
 
 

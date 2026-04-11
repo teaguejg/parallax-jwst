@@ -1,4 +1,3 @@
-import colorsys
 import logging
 import warnings
 
@@ -10,7 +9,6 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
 from PyQt6.QtCore import pyqtSignal, Qt, QThread
-from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QLabel,
     QProgressBar, QPushButton,
@@ -43,23 +41,6 @@ _STEP_ORDER = {
     "chart": 7, "cutout": 7,
 }
 
-_FILTER_WL = {
-    "F070W": 0.70, "F090W": 0.90, "F115W": 1.15, "F150W": 1.50,
-    "F162M": 1.63, "F164N": 1.64, "F182M": 1.84, "F187N": 1.87,
-    "F200W": 2.00, "F210M": 2.10, "F212N": 2.12, "F250M": 2.50,
-    "F277W": 2.77, "F300M": 3.00, "F323N": 3.23, "F335M": 3.36,
-    "F356W": 3.56, "F360M": 3.62, "F405N": 4.05, "F410M": 4.10,
-    "F430M": 4.28, "F444W": 4.44, "F460M": 4.63, "F470N": 4.71,
-    "F480M": 4.82,
-}
-
-
-def _sort_key(filt):
-    wl = _FILTER_WL.get(filt.upper())
-    if wl is not None:
-        return (0, wl)
-    return (1, filt)
-
 
 def _find_sci_hdu(hdul):
     try:
@@ -74,111 +55,120 @@ def _find_sci_hdu(hdul):
     return None
 
 
-def _auto_colors(sorted_filters):
-    n = len(sorted_filters)
-    if n == 0:
-        return {}
-    if n == 1:
-        return {sorted_filters[0]: (1.0, 1.0, 1.0)}
-    if n == 2:
-        return {sorted_filters[0]: (0.0, 0.0, 1.0),
-                sorted_filters[1]: (1.0, 0.0, 0.0)}
-    colors = {}
-    for i, filt in enumerate(sorted_filters):
-        hue = 0.67 * (1.0 - i / (n - 1))
-        r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
-        colors[filt] = (r, g, b)
-    return colors
+class SkyCompositeWorker(QThread):
+    """Build a reprojected coadd from report FITS files."""
+    sky_ready = pyqtSignal(np.ndarray, object)  # (image_2d, wcs)
+    sky_failed = pyqtSignal()
 
-
-def _downsample(data, max_dim=1024):
-    """Bin-downsample to keep longest axis <= max_dim."""
-    h, w = data.shape
-    factor = max(1, max(h, w) // max_dim)
-    if factor == 1:
-        return data
-    nh = (h // factor) * factor
-    nw = (w // factor) * factor
-    trimmed = data[:nh, :nw]
-    return trimmed.reshape(nh // factor, factor, nw // factor, factor).mean(axis=(1, 3))
-
-
-class CompositeWorker(QThread):
-    composite_ready = pyqtSignal(np.ndarray, object)
-    composite_failed = pyqtSignal()
-
-    def __init__(self, report_id, parent=None):
+    def __init__(self, report_id, candidates=None, parent=None):
         super().__init__(parent)
         self._report_id = report_id
+        self._candidates = candidates or []
+
+    def _field_center(self):
+        ras = [c.ra for c in self._candidates if not np.isnan(c.ra)]
+        decs = [c.dec for c in self._candidates if not np.isnan(c.dec)]
+        if not ras or not decs:
+            return None
+        return float(np.median(ras)), float(np.median(decs))
+
+    def _pick_path(self, paths, field_coord):
+        if len(paths) == 1 or field_coord is None:
+            return paths[0]
+        import warnings as _w
+        from astropy.wcs import FITSFixedWarning
+        for path in paths:
+            try:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore", FITSFixedWarning)
+                    with fits.open(path) as hdul:
+                        sci = _find_sci_hdu(hdul)
+                        if sci is None:
+                            continue
+                        w = WCS(sci.header)
+                        if w.footprint_contains(field_coord):
+                            return path
+            except Exception:
+                continue
+        return paths[0]
+
+    def _load_tiles(self, paths):
+        tiles = []
+        for path in paths:
+            try:
+                with fits.open(path) as hdul:
+                    sci = _find_sci_hdu(hdul)
+                    if sci is None:
+                        continue
+                    arr = sci.data.astype(np.float64)[::4, ::4]
+                    w = WCS(sci.header)
+                    w.wcs.crpix = [
+                        (w.wcs.crpix[0] - 1) / 4 + 1,
+                        (w.wcs.crpix[1] - 1) / 4 + 1,
+                    ]
+                    if w.wcs.has_cd():
+                        w.wcs.cd = w.wcs.cd * 4
+                    else:
+                        w.wcs.cdelt = [
+                            w.wcs.cdelt[0] * 4,
+                            w.wcs.cdelt[1] * 4,
+                        ]
+                    if hasattr(w, 'pixel_shape') and w.pixel_shape is not None:
+                        w.pixel_shape = arr.shape[::-1]
+                    w.wcs.set()
+                    tiles.append((arr, w))
+            except Exception:
+                continue
+        return tiles
+
+    def _normalize(self, coadd):
+        interval = ZScaleInterval()
+        stretch = AsinhStretch()
+        norm = ImageNormalize(coadd, interval=interval, stretch=stretch)
+        return np.nan_to_num(norm(coadd), nan=0.0)
 
     def run(self):
         try:
             from parallax import archive
             fits_map = archive.get_fits_for_report(self._report_id)
             if not fits_map:
-                self.composite_failed.emit()
+                self.sky_failed.emit()
                 return
 
-            arrays = {}
-            wcs_out = None
-            for filt, path in fits_map.items():
-                try:
-                    with fits.open(path) as hdul:
-                        sci = _find_sci_hdu(hdul)
-                        if sci is None:
-                            continue
-                        if wcs_out is None:
-                            try:
-                                wcs_out = WCS(sci.header)
-                            except Exception:
-                                pass
-                        arrays[filt] = sci.data.astype(np.float64)
-                except Exception:
-                    continue
-
-            if not arrays:
-                self.composite_failed.emit()
+            # pick filter with the most files
+            best_filt = max(fits_map, key=lambda f: len(fits_map[f]))
+            paths = fits_map[best_filt]
+            tiles = self._load_tiles(paths)
+            if not tiles:
+                self.sky_failed.emit()
                 return
 
-            sorted_f = sorted(arrays.keys(), key=_sort_key)
-            colors = _auto_colors(sorted_f)
+            if len(tiles) == 1:
+                arr, wcs_out = tiles[0]
+                self.sky_ready.emit(self._normalize(np.nan_to_num(arr, nan=0.0)), wcs_out)
+                return
 
-            # downsample all to same shape based on first
-            ds = {}
-            for filt in sorted_f:
-                ds[filt] = _downsample(arrays[filt])
-
-            # find common shape (use smallest dims)
-            min_h = min(a.shape[0] for a in ds.values())
-            min_w = min(a.shape[1] for a in ds.values())
-
-            interval = ZScaleInterval()
-            stretch = AsinhStretch()
-
-            r_plane = np.zeros((min_h, min_w), dtype=np.float64)
-            g_plane = np.zeros((min_h, min_w), dtype=np.float64)
-            b_plane = np.zeros((min_h, min_w), dtype=np.float64)
-
-            for filt in sorted_f:
-                arr = ds[filt][:min_h, :min_w]
-                norm = ImageNormalize(arr, interval=interval, stretch=stretch)
-                normed = np.nan_to_num(norm(arr), nan=0.0)
-                cr, cg, cb = colors[filt]
-                r_plane += normed * cr
-                g_plane += normed * cg
-                b_plane += normed * cb
-
-            rgb = np.clip(np.stack([r_plane, g_plane, b_plane], axis=-1), 0, 1)
-            self.composite_ready.emit(rgb, wcs_out)
-
+            # multi-detector mosaic
+            try:
+                from reproject.mosaicking import find_optimal_celestial_wcs, reproject_and_coadd
+                from reproject import reproject_interp
+                input_data = [(arr, w) for arr, w in tiles]
+                wcs_out, shape_out = find_optimal_celestial_wcs(
+                    input_data, auto_rotate=False,
+                )
+                coadd, _ = reproject_and_coadd(
+                    input_data, wcs_out, shape_out=shape_out,
+                    reproject_function=reproject_interp,
+                    combine_function="mean",
+                )
+                self.sky_ready.emit(self._normalize(np.nan_to_num(coadd, nan=0.0)), wcs_out)
+            except Exception:
+                logger.warning("mosaic failed, using single tile")
+                arr, wcs_out = tiles[0]
+                self.sky_ready.emit(self._normalize(np.nan_to_num(arr, nan=0.0)), wcs_out)
         except Exception:
-            logger.exception("composite worker failed")
-            self.composite_failed.emit()
-
-
-_MODE_SCATTER = 0
-_MODE_COMPOSITE = 1
-_MODE_BOTH = 2
+            logger.exception("sky composite worker failed")
+            self.sky_failed.emit()
 
 
 class SkyPanel(QWidget):
@@ -194,6 +184,7 @@ class SkyPanel(QWidget):
         self._stack = QStackedWidget()
         layout.addWidget(self._stack)
 
+        # page 0: progress / idle
         self._progress_page = QWidget()
         pg_layout = QVBoxLayout(self._progress_page)
         pg_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -210,11 +201,11 @@ class SkyPanel(QWidget):
         pg_layout.addWidget(self._step_label)
         self._stack.addWidget(self._progress_page)
 
+        # page 1: sky view (WCS composite or scatter fallback)
         self._plot_page = QWidget()
         plot_layout = QVBoxLayout(self._plot_page)
         plot_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._zoom_row = QHBoxLayout()
         self._zoom_row_widget = QWidget()
         zr_inner = QHBoxLayout(self._zoom_row_widget)
         zr_inner.setContentsMargins(4, 4, 0, 0)
@@ -229,15 +220,6 @@ class SkyPanel(QWidget):
             self._zoom_btns.append(btn)
         zr_inner.addStretch()
 
-        # field mode button
-        self._field_btn = QPushButton("Field")
-        self._field_btn.setFixedWidth(52)
-        self._field_btn.setFixedHeight(22)
-        self._field_btn.setStyleSheet("font-size: 11px; padding: 0;")
-        self._field_btn.setEnabled(False)
-        self._field_btn.clicked.connect(self._cycle_mode)
-        zr_inner.addWidget(self._field_btn)
-
         plot_layout.addWidget(self._zoom_row_widget)
 
         self._fig = Figure(figsize=(8, 8))
@@ -247,71 +229,41 @@ class SkyPanel(QWidget):
         plot_layout.addWidget(self._canvas)
         self._stack.addWidget(self._plot_page)
 
+        # page 2: loading label while composite builds
+        self._loading_page = QWidget()
+        ld_layout = QVBoxLayout(self._loading_page)
+        ld_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label = QLabel("Loading sky view...")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("color: #888; font-size: 13px;")
+        ld_layout.addWidget(self._loading_label)
+        self._stack.addWidget(self._loading_page)
+
         self._canvas.mpl_connect("button_press_event", self._on_click)
         self._canvas.mpl_connect("scroll_event", self._on_scroll)
-
-        self._composite_page = QWidget()
-        comp_layout = QVBoxLayout(self._composite_page)
-        comp_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._comp_toolbar = QWidget()
-        ct_layout = QHBoxLayout(self._comp_toolbar)
-        ct_layout.setContentsMargins(4, 4, 0, 0)
-        ct_layout.addStretch()
-        self._comp_field_btn = QPushButton("Scatter")
-        self._comp_field_btn.setFixedWidth(52)
-        self._comp_field_btn.setFixedHeight(22)
-        self._comp_field_btn.setStyleSheet("font-size: 11px; padding: 0;")
-        self._comp_field_btn.clicked.connect(self._cycle_mode)
-        ct_layout.addWidget(self._comp_field_btn)
-        comp_layout.addWidget(self._comp_toolbar)
-
-        self._comp_fig = Figure(figsize=(8, 8))
-        self._comp_ax = self._comp_fig.add_subplot(111)
-        self._comp_canvas = FigureCanvasQTAgg(self._comp_fig)
-        comp_layout.addWidget(self._comp_canvas)
-        self._stack.addWidget(self._composite_page)
-
-        self._both_page = QWidget()
-        both_layout = QVBoxLayout(self._both_page)
-        both_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._both_toolbar = QWidget()
-        bt_layout = QHBoxLayout(self._both_toolbar)
-        bt_layout.setContentsMargins(4, 4, 0, 0)
-        bt_layout.addStretch()
-        self._both_field_btn = QPushButton("Both")
-        self._both_field_btn.setFixedWidth(52)
-        self._both_field_btn.setFixedHeight(22)
-        self._both_field_btn.setStyleSheet("font-size: 11px; padding: 0;")
-        self._both_field_btn.clicked.connect(self._cycle_mode)
-        bt_layout.addWidget(self._both_field_btn)
-        both_layout.addWidget(self._both_toolbar)
-
-        self._both_container = QHBoxLayout()
-        self._both_left = QLabel()
-        self._both_left.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._both_right = QLabel()
-        self._both_right.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._both_container.addWidget(self._both_left)
-        self._both_container.addWidget(self._both_right)
-        both_layout.addLayout(self._both_container, stretch=1)
-        self._stack.addWidget(self._both_page)
+        self._canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
+        self._canvas.mpl_connect("button_release_event", self._on_mouse_release)
 
         self._candidates = []
         self._scatter_known = None
         self._scatter_other = {}
+        self._scatter_bookmarked = None
+        self._scatter_viewed = None
         self._selected_marker = None
         self._current_report_id = None
         self._original_xlim = None
         self._original_ylim = None
         self._selected_candidate = None
+        self._pan_start = None
+        self._pan_xlim = None
+        self._pan_ylim = None
 
-        self._composite_rgb = None
-        self._composite_wcs = None
-        self._composite_report_id = None
-        self._composite_worker = None
-        self._view_mode = _MODE_SCATTER
+        self._zoom_label = None
+        self._sky_wcs = None
+        self._sky_image = None
+        self._wcs_mode = False
+        self._sky_worker = None
+        self._pending_report = None
         self._known_visible = False
 
         self.show_idle()
@@ -330,7 +282,6 @@ class SkyPanel(QWidget):
         self._status_label.setText(f"{step.capitalize()}: {detail}")
         self._status_label.setVisible(True)
 
-        # indeterminate bar for acquire/downloading, determinate for others
         if step in ("acquire", "downloading"):
             self._progress_bar.setRange(0, 0)
         else:
@@ -349,11 +300,9 @@ class SkyPanel(QWidget):
         self._stack.setCurrentIndex(0)
 
     def show_plot(self):
-        self._view_mode = _MODE_SCATTER
-        self._update_mode_ui()
+        self._stack.setCurrentIndex(1)
 
     def load_report(self, report):
-        self._ax.clear()
         self._current_report_id = report.id
         self._candidates = list(report.candidates) if report.candidates else []
         self._scatter_known = None
@@ -361,7 +310,156 @@ class SkyPanel(QWidget):
         self._scatter_bookmarked = None
         self._scatter_viewed = None
         self._selected_marker = None
-        self._view_mode = _MODE_SCATTER
+        self._selected_candidate = None
+        self._pending_report = report
+
+        # show loading page while worker builds the composite
+        self._stack.setCurrentIndex(2)
+        self._start_sky_worker(report.id)
+
+    def _start_sky_worker(self, report_id):
+        if self._sky_worker is not None and self._sky_worker.isRunning():
+            return
+        self._sky_worker = SkyCompositeWorker(report_id, self._candidates, self)
+        self._sky_worker.sky_ready.connect(
+            lambda img, wcs, rid=report_id: self._on_sky_ready(rid, img, wcs)
+        )
+        self._sky_worker.sky_failed.connect(
+            lambda rid=report_id: self._on_sky_failed(rid)
+        )
+        self._sky_worker.start()
+
+    def _on_sky_ready(self, report_id, image, wcs):
+        if self._current_report_id != report_id:
+            return
+        self._sky_image = image
+        self._sky_wcs = wcs
+        self._wcs_mode = True
+        self._draw_wcs_view()
+        self._stack.setCurrentIndex(1)
+
+    def _on_sky_failed(self, report_id):
+        if self._current_report_id != report_id:
+            return
+        logger.warning("sky composite unavailable, falling back to scatter")
+        self._sky_wcs = None
+        self._sky_image = None
+        self._wcs_mode = False
+        self._draw_scatter()
+        self._stack.setCurrentIndex(1)
+
+    def _draw_wcs_view(self):
+        # preserve zoom across redraws (overlay refresh, bookmark toggle)
+        saved_xlim = None
+        saved_ylim = None
+        if self._original_xlim is not None:
+            saved_xlim = self._ax.get_xlim()
+            saved_ylim = self._ax.get_ylim()
+
+        self._selected_marker = None
+        self._zoom_label = None
+        self._fig.clear()
+        self._ax = self._fig.add_subplot(111)
+
+        self._ax.imshow(self._sky_image, origin="lower", cmap="gray_r",
+                        interpolation="nearest")
+        self._ax.set_xlabel("RA")
+        self._ax.set_ylabel("Dec")
+        self._set_wcs_ticks()
+
+        if self._pending_report:
+            rpt = self._pending_report
+            date_str = rpt.created_at.strftime("%Y-%m-%d") if rpt.created_at else ""
+            self._ax.set_title(f"{rpt.target}  {date_str}", fontsize=10)
+
+        self._overlay_markers_wcs()
+        self._ax.invert_xaxis()
+
+        self._original_xlim = self._ax.get_xlim()
+        self._original_ylim = self._ax.get_ylim()
+        self._zoom_label = self._ax.text(
+            0.01, 0.01, '', transform=self._ax.transAxes,
+            ha='left', va='bottom', fontsize=8, color='white', zorder=20,
+        )
+        self._fig.subplots_adjust(left=0.15, right=0.95, top=0.93, bottom=0.12)
+        self._canvas.draw()
+
+        if saved_xlim is not None:
+            self._ax.set_xlim(saved_xlim)
+            self._ax.set_ylim(saved_ylim)
+            self._canvas.draw()
+
+    def _set_wcs_ticks(self):
+        if self._sky_wcs is None:
+            return
+        h, w = self._sky_image.shape[:2]
+        try:
+            xticks = np.linspace(0, w - 1, 5)
+            yticks = np.linspace(0, h - 1, 5)
+            xworld = self._sky_wcs.all_pix2world(xticks, np.full(5, h / 2), 0)
+            yworld = self._sky_wcs.all_pix2world(np.full(5, w / 2), yticks, 0)
+            self._ax.set_xticks(xticks)
+            self._ax.set_xticklabels([f"{r:.4f}" for r in xworld[0]], fontsize=7)
+            self._ax.set_yticks(yticks)
+            self._ax.set_yticklabels([f"{d:.4f}" for d in yworld[1]], fontsize=7)
+        except Exception:
+            pass
+
+    def _overlay_markers_wcs(self):
+        if self._sky_wcs is None:
+            return
+        h, w = self._sky_image.shape[:2]
+
+        vis_candidates = []
+        for c in self._candidates:
+            if c.classification == "known" and not self._known_visible:
+                continue
+            vis_candidates.append(c)
+
+        if not vis_candidates:
+            return
+
+        ras = np.array([c.ra for c in vis_candidates])
+        decs = np.array([c.dec for c in vis_candidates])
+
+        try:
+            pxs, pys = self._sky_wcs.all_world2pix(ras, decs, 0)
+        except Exception:
+            return
+
+        for i, c in enumerate(vis_candidates):
+            px, py = float(pxs[i]), float(pys[i])
+            if px < -50 or py < -50 or px >= w + 50 or py >= h + 50:
+                continue
+            if c.classification == "known":
+                color = _COLORS["known"]
+                ms = max(3, min(c.snr * 0.6, 10))
+                alpha = 0.6
+            else:
+                color = _conf_color(c.confidence)
+                ms = max(3, min(c.snr * 0.8, 15))
+                alpha = 0.8
+
+            is_bm = "bookmarked" in (c.tags or [])
+            is_vw = "viewed" in (c.tags or [])
+
+            if is_bm:
+                self._ax.plot(px, py, 'o', markersize=ms + 2,
+                              markerfacecolor='none', markeredgecolor='#f1c40f',
+                              markeredgewidth=1.2, zorder=6, alpha=0.9)
+            if is_vw:
+                self._ax.plot(px, py, 'o', markersize=ms - 1,
+                              markerfacecolor='none', markeredgecolor='#27ae60',
+                              markeredgewidth=1.0, zorder=5, alpha=0.8)
+
+            self._ax.plot(px, py, 'o', markersize=ms,
+                          markerfacecolor='none', markeredgecolor=color,
+                          markeredgewidth=1.0, zorder=4, alpha=alpha)
+
+    def _draw_scatter(self):
+        self._fig.clear()
+        self._ax = self._fig.add_subplot(111)
+        self._wcs_mode = False
 
         for cls, color in _COLORS.items():
             subset = [c for c in self._candidates if c.classification == cls]
@@ -374,12 +472,11 @@ class SkyPanel(QWidget):
                 sizes = np.clip(snrs * 10, 20, 40)
                 sc = self._ax.scatter(
                     ras, decs, s=sizes, c=color,
-                    label=cls, alpha=0.6, edgecolors="none",
-                    linewidth=0,
+                    label=cls, alpha=0.6, edgecolors="none", linewidth=0,
                 )
                 self._scatter_known = sc
-                sc.set_visible(False)
-                sc.set_label("known (hidden)")
+                sc.set_visible(self._known_visible)
+                sc.set_label("known" if self._known_visible else "known (hidden)")
             else:
                 sizes = np.clip(snrs * 10, 20, 200)
                 colors = [_conf_color(c.confidence) for c in subset]
@@ -389,7 +486,6 @@ class SkyPanel(QWidget):
                 )
                 self._scatter_other[cls] = sc
 
-        # legend entries for confidence tiers
         for label, lc in [
             ("unverified (high)", "#c0392b"),
             ("unverified (med)", "#e67e22"),
@@ -426,15 +522,16 @@ class SkyPanel(QWidget):
         self._ax.set_xlabel("RA (deg)")
         self._ax.set_ylabel("Dec (deg)")
 
-        # title is target + run date; filters go in corner annotation
-        date_str = report.created_at.strftime("%Y-%m-%d") if report.created_at else ""
-        self._ax.set_title(f"{report.target}  {date_str}")
-        if report.filters:
-            filters_str = " ".join(sorted(set(report.filters)))
-            self._ax.annotate(
-                filters_str, xy=(0.99, 0.01), xycoords="axes fraction",
-                ha="right", va="bottom", fontsize=7, color="#555555",
-            )
+        if self._pending_report:
+            rpt = self._pending_report
+            date_str = rpt.created_at.strftime("%Y-%m-%d") if rpt.created_at else ""
+            self._ax.set_title(f"{rpt.target}  {date_str}")
+            if rpt.filters:
+                fstr = " ".join(sorted(set(rpt.filters)))
+                self._ax.annotate(
+                    fstr, xy=(0.99, 0.01), xycoords="axes fraction",
+                    ha="right", va="bottom", fontsize=7, color="#555555",
+                )
 
         self._ax.legend(fontsize=8, loc="upper right")
         self._ax.grid(True, alpha=0.3)
@@ -443,143 +540,11 @@ class SkyPanel(QWidget):
         self._fig.tight_layout()
         self._canvas.draw()
 
-        if self._composite_report_id != report.id:
-            self._composite_rgb = None
-            self._composite_wcs = None
-            self._composite_report_id = None
-            self._field_btn.setEnabled(False)
-            self._start_composite_worker(report.id)
-        else:
-            self._field_btn.setEnabled(self._composite_rgb is not None)
-
-        self._update_mode_ui()
-
-    def _start_composite_worker(self, report_id):
-        if self._composite_worker is not None and self._composite_worker.isRunning():
-            return
-        self._composite_worker = CompositeWorker(report_id, self)
-        self._composite_worker.composite_ready.connect(
-            lambda rgb, wcs, rid=report_id: self._on_composite_ready(rid, rgb, wcs)
-        )
-        self._composite_worker.composite_failed.connect(self._on_composite_failed)
-        self._composite_worker.start()
-
-    def _on_composite_ready(self, report_id, rgb, wcs):
-        self._composite_rgb = rgb
-        self._composite_wcs = wcs
-        self._composite_report_id = report_id
-        # only enable if still viewing same report
-        if self._current_report_id == report_id:
-            self._field_btn.setEnabled(True)
-
-    def _on_composite_failed(self):
-        logger.warning("composite build failed, field view unavailable")
-        self._field_btn.setEnabled(False)
-
-    def _draw_composite(self):
-        self._comp_fig.clear()
-        self._comp_ax = self._comp_fig.add_subplot(111)
-        self._comp_ax.imshow(self._composite_rgb, origin="lower")
-
-        if self._composite_wcs is not None:
-            from astropy.coordinates import SkyCoord
-            h, w = self._composite_rgb.shape[:2]
-            for c in self._candidates:
-                if c.classification == "known" and not self._known_visible:
-                    continue
-                try:
-                    coord = SkyCoord(c.ra, c.dec, unit="deg")
-                    px, py = self._composite_wcs.world_to_pixel(coord)
-                    px, py = float(px), float(py)
-                    if px < 0 or py < 0 or px >= w or py >= h:
-                        continue
-                    if c.classification == "known":
-                        color = _COLORS["known"]
-                    else:
-                        color = _conf_color(c.confidence)
-                    radius = max(3, min(c.snr * 0.8, 15))
-                    self._comp_ax.plot(px, py, 'o', markersize=radius,
-                                       markerfacecolor='none', markeredgecolor=color,
-                                       markeredgewidth=1.0)
-                except Exception:
-                    continue
-
-            # viewed markers
-            for c in self._candidates:
-                if "viewed" not in (c.tags or []):
-                    continue
-                try:
-                    coord = SkyCoord(c.ra, c.dec, unit="deg")
-                    px, py = self._composite_wcs.world_to_pixel(coord)
-                    px, py = float(px), float(py)
-                    if px < 0 or py < 0 or px >= w or py >= h:
-                        continue
-                    self._comp_ax.plot(px, py, 'o', markersize=5,
-                                       markerfacecolor='none', markeredgecolor='#27ae60',
-                                       markeredgewidth=1.2)
-                except Exception:
-                    continue
-
-        self._comp_ax.set_axis_off()
-        self._comp_fig.tight_layout()
-        self._comp_canvas.draw()
-
-    def _draw_both(self):
-        # render scatter to pixmap
-        scatter_pm = self._fig_to_pixmap(self._fig)
-        comp_pm = self._fig_to_pixmap(self._comp_fig)
-
-        # scale to half available width
-        avail = self.width() // 2 - 10
-        if avail > 50:
-            self._both_left.setPixmap(
-                scatter_pm.scaledToWidth(avail, Qt.TransformationMode.SmoothTransformation)
-            )
-            self._both_right.setPixmap(
-                comp_pm.scaledToWidth(avail, Qt.TransformationMode.SmoothTransformation)
-            )
-        else:
-            self._both_left.setPixmap(scatter_pm)
-            self._both_right.setPixmap(comp_pm)
-
-    def _fig_to_pixmap(self, fig):
-        fig.canvas.draw()
-        buf = fig.canvas.buffer_rgba()
-        w, h = fig.canvas.get_width_height()
-        img = QImage(buf, w, h, QImage.Format.Format_RGBA8888)
-        return QPixmap.fromImage(img)
-
-    def _cycle_mode(self):
-        if self._view_mode == _MODE_SCATTER:
-            self._view_mode = _MODE_COMPOSITE
-        elif self._view_mode == _MODE_COMPOSITE:
-            self._view_mode = _MODE_BOTH
-        else:
-            self._view_mode = _MODE_SCATTER
-        self._update_mode_ui()
-
-    def _update_mode_ui(self):
-        if self._view_mode == _MODE_SCATTER:
-            self._stack.setCurrentIndex(1)
-            self._field_btn.setText("Field")
-            for btn in self._zoom_btns:
-                btn.setVisible(True)
-        elif self._view_mode == _MODE_COMPOSITE:
-            self._draw_composite()
-            self._stack.setCurrentIndex(2)
-            self._comp_field_btn.setText("Scatter")
-            for btn in self._zoom_btns:
-                btn.setVisible(False)
-        else:
-            self._draw_composite()
-            self._draw_both()
-            self._stack.setCurrentIndex(3)
-            self._both_field_btn.setText("Both")
-            for btn in self._zoom_btns:
-                btn.setVisible(False)
-
     def set_known_visible(self, visible):
         self._known_visible = visible
+        if self._wcs_mode:
+            self._draw_wcs_view()
+            return
         if self._scatter_known is None:
             return
         self._scatter_known.set_visible(visible)
@@ -610,13 +575,22 @@ class SkyPanel(QWidget):
         self._ax.set_xlim(xdata - new_w * relx, xdata + new_w * (1 - relx))
         self._ax.set_ylim(ydata - new_h * rely, ydata + new_h * (1 - rely))
         self._canvas.draw()
+        self._update_zoom_label()
 
     def _apply_zoom(self, scale):
         xlim = self._ax.get_xlim()
         ylim = self._ax.get_ylim()
-        if self._selected_candidate is not None:
+        if self._selected_candidate is not None and not self._wcs_mode:
             cx = self._selected_candidate.ra
             cy = self._selected_candidate.dec
+        elif self._selected_candidate is not None and self._wcs_mode and self._sky_wcs is not None:
+            try:
+                px, py = self._sky_wcs.all_world2pix(
+                    [self._selected_candidate.ra], [self._selected_candidate.dec], 0)
+                cx, cy = float(px[0]), float(py[0])
+            except Exception:
+                cx = (xlim[0] + xlim[1]) / 2
+                cy = (ylim[0] + ylim[1]) / 2
         else:
             cx = (xlim[0] + xlim[1]) / 2
             cy = (ylim[0] + ylim[1]) / 2
@@ -625,6 +599,7 @@ class SkyPanel(QWidget):
         self._ax.set_xlim(cx - hw, cx + hw)
         self._ax.set_ylim(cy - hh, cy + hh)
         self._canvas.draw()
+        self._update_zoom_label()
 
     def _zoom_in(self):
         self._apply_zoom(1 / 1.15)
@@ -637,57 +612,74 @@ class SkyPanel(QWidget):
             self._ax.set_xlim(self._original_xlim)
             self._ax.set_ylim(self._original_ylim)
             self._canvas.draw()
+        self._update_zoom_label()
 
-    def _on_click(self, event):
-        if event.dblclick:
-            if event.button != 1 or event.inaxes != self._ax:
-                return
-            if not self._candidates:
-                return
-            best = None
-            best_dist = float("inf")
-            for c in self._candidates:
-                if c.classification == "known" and self._scatter_known and not self._scatter_known.get_visible():
-                    continue
-                px, py = self._ax.transData.transform((c.ra, c.dec))
-                dx = px - event.x
-                dy = py - event.y
-                dist = (dx*dx + dy*dy)**0.5
-                if dist < best_dist:
-                    best_dist = dist
-                    best = c
-            if best is not None and best_dist <= 10:
-                self.candidate_inspected.emit(best.id)
+    def _update_zoom_label(self):
+        if self._zoom_label is None or self._original_xlim is None:
             return
-        if event.button != 1 or event.inaxes != self._ax:
-            return
+        cur = abs(self._ax.get_xlim()[1] - self._ax.get_xlim()[0])
+        orig = abs(self._original_xlim[1] - self._original_xlim[0])
+        ratio = orig / cur
+        if abs(ratio - 1.0) < 0.05:
+            self._zoom_label.set_text('')
+        else:
+            self._zoom_label.set_text(f'{ratio:.1f}x')
+        self._canvas.draw()
 
+    def _candidate_at_event(self, event):
         if not self._candidates:
-            return
+            return None, float("inf")
 
         best = None
         best_dist = float("inf")
+
         for c in self._candidates:
-            if c.classification == "known" and self._scatter_known and not self._scatter_known.get_visible():
+            if c.classification == "known" and not self._known_visible:
                 continue
-            px, py = self._ax.transData.transform((c.ra, c.dec))
-            dx = px - event.x
-            dy = py - event.y
+
+            if self._wcs_mode and self._sky_wcs is not None:
+                try:
+                    px, py = self._sky_wcs.all_world2pix([c.ra], [c.dec], 0)
+                    data_x, data_y = float(px[0]), float(py[0])
+                except Exception:
+                    continue
+            else:
+                data_x, data_y = c.ra, c.dec
+
+            sx, sy = self._ax.transData.transform((data_x, data_y))
+            dx = sx - event.x
+            dy = sy - event.y
             dist = (dx * dx + dy * dy) ** 0.5
             if dist < best_dist:
                 best_dist = dist
                 best = c
 
+        return best, best_dist
+
+    def _on_click(self, event):
+        if event.button == 3 and event.inaxes == self._ax and event.xdata is not None:
+            self._pan_start = (event.x, event.y)
+            self._pan_xlim = self._ax.get_xlim()
+            self._pan_ylim = self._ax.get_ylim()
+            return
+
+        if event.dblclick:
+            if event.button != 1 or event.inaxes != self._ax:
+                return
+            best, best_dist = self._candidate_at_event(event)
+            if best is not None and best_dist <= 10:
+                self.candidate_inspected.emit(best.id)
+            return
+
+        if event.button != 1 or event.inaxes != self._ax:
+            return
+
+        best, best_dist = self._candidate_at_event(event)
+
         if best is not None and best_dist <= 10:
             self._selected_candidate = best
             self.candidate_selected.emit(best.id)
-            if self._selected_marker is not None:
-                self._selected_marker.remove()
-            self._selected_marker = self._ax.scatter(
-                [best.ra], [best.dec], s=120,
-                facecolors="none", edgecolors="white", linewidth=2, zorder=10,
-            )
-            self._canvas.draw()
+            self._draw_selection_marker(best)
         else:
             self._selected_candidate = None
             if self._selected_marker is not None:
@@ -695,6 +687,45 @@ class SkyPanel(QWidget):
                 self._selected_marker = None
                 self._canvas.draw()
             self.candidate_deselected.emit()
+
+    def _on_mouse_move(self, event):
+        if self._pan_start is None or event.button != 3:
+            return
+        dx_px = event.x - self._pan_start[0]
+        dy_px = event.y - self._pan_start[1]
+        inv = self._ax.transData.inverted()
+        origin = inv.transform((0, 0))
+        delta = inv.transform((dx_px, dy_px))
+        dx_data = delta[0] - origin[0]
+        dy_data = delta[1] - origin[1]
+        self._ax.set_xlim(self._pan_xlim[0] - dx_data, self._pan_xlim[1] - dx_data)
+        self._ax.set_ylim(self._pan_ylim[0] - dy_data, self._pan_ylim[1] - dy_data)
+        self._canvas.draw()
+
+    def _on_mouse_release(self, event):
+        if event.button == 3:
+            self._pan_start = None
+            self._update_zoom_label()
+
+    def _draw_selection_marker(self, cand):
+        if self._selected_marker is not None:
+            self._selected_marker.remove()
+
+        if self._wcs_mode and self._sky_wcs is not None:
+            try:
+                px, py = self._sky_wcs.all_world2pix([cand.ra], [cand.dec], 0)
+                mx, my = float(px[0]), float(py[0])
+            except Exception:
+                mx, my = cand.ra, cand.dec
+        else:
+            mx, my = cand.ra, cand.dec
+
+        self._selected_marker = self._ax.plot(
+            mx, my, marker='o', markersize=14,
+            markerfacecolor='none', markeredgecolor='white',
+            markeredgewidth=2, zorder=10, linestyle='none',
+        )[0]
+        self._canvas.draw()
 
     def deselect(self):
         self._selected_candidate = None
@@ -705,12 +736,17 @@ class SkyPanel(QWidget):
         self.candidate_deselected.emit()
 
     def refresh_overlays(self):
-        from parallax import catalog
+        from parallax import catalog as cat_mod
         for c in self._candidates:
-            fresh = catalog.get(c.id)
+            fresh = cat_mod.get(c.id)
             if fresh is not None:
                 c.tags = fresh.tags
 
+        if self._wcs_mode:
+            self._draw_wcs_view()
+            return
+
+        # scatter mode refresh
         if self._scatter_bookmarked is not None:
             self._scatter_bookmarked.remove()
             self._scatter_bookmarked = None
@@ -758,22 +794,26 @@ class SkyPanel(QWidget):
             return
 
         self._selected_candidate = cand
+        self._draw_selection_marker(cand)
 
-        if self._selected_marker is not None:
-            self._selected_marker.remove()
-        self._selected_marker = self._ax.scatter(
-            [cand.ra], [cand.dec], s=120,
-            facecolors="none", edgecolors="white", linewidth=2, zorder=10,
-        )
+        if self._wcs_mode and self._sky_wcs is not None:
+            try:
+                px, py = self._sky_wcs.all_world2pix([cand.ra], [cand.dec], 0)
+                cx, cy = float(px[0]), float(py[0])
+            except Exception:
+                cx, cy = None, None
+        else:
+            cx, cy = cand.ra, cand.dec
 
-        xlim = self._ax.get_xlim()
-        ylim = self._ax.get_ylim()
-        hw = (xlim[1] - xlim[0]) / 2
-        hh = (ylim[1] - ylim[0]) / 2
-        self._ax.set_xlim(cand.ra - hw, cand.ra + hw)
-        self._ax.set_ylim(cand.dec - hh, cand.dec + hh)
+        if cx is not None:
+            xlim = self._ax.get_xlim()
+            ylim = self._ax.get_ylim()
+            hw = (xlim[1] - xlim[0]) / 2
+            hh = (ylim[1] - ylim[0]) / 2
+            self._ax.set_xlim(cx - hw, cx + hw)
+            self._ax.set_ylim(cy - hh, cy + hh)
+            self._canvas.draw()
 
-        self._canvas.draw()
         self.candidate_selected.emit(candidate_id)
 
     def clear(self):
@@ -784,4 +824,7 @@ class SkyPanel(QWidget):
         self._scatter_viewed = None
         self._scatter_other = {}
         self._selected_marker = None
+        self._sky_wcs = None
+        self._sky_image = None
+        self._wcs_mode = False
         self._canvas.draw()

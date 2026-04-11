@@ -19,5 +19,5 @@ class SessionLogHandler(logging.Handler):
         return self._emitter.message_logged
 
     def emit(self, record):
-        msg = f"{record.levelname} {record.getMessage()}"
+        msg = f"{record.levelname} {self.format(record)}"
         self._emitter.message_logged.emit(msg)
