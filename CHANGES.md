@@ -1,5 +1,74 @@
 # Changes
 
+## 1.4.0
+
+- Target name normalization now handles lowercase catalog prefixes (e.g.
+  "ngc 3132" resolves correctly in addition to "NGC 3132"). Whitespace is
+  stripped before matching.
+- SkyPanel replaced scatter plot with a FITS composite as the default sky view.
+  The panel loads FITS files for the active report, reprojects them onto a shared
+  WCS frame using `reproject`, and displays the coadded image on a plain axes
+  with RA/Dec tick labels derived from the WCS (x-axis inverted for RA).
+- Candidate markers overlay the sky image using WCS coordinate-to-pixel
+  conversion. Classification coloring, bookmarked/viewed overlays, selection
+  markers, and hit-testing all carry over from the scatter implementation.
+- Falls back to the scatter plot when FITS data is unavailable or WCS fails.
+- Composite is built off the main thread (SkyCompositeWorker) with a
+  "Loading sky view..." label shown while processing.
+- The "Field" / "Scatter" / "Both" mode cycling removed; single view replaces it.
+- New dependency: `reproject>=0.13`.
+- 13 new tests for sky view logic (fallback, marker positions, coloring, signals).
+- `get_fits_for_report` now returns `dict[str, list[str]]` (all on-disk paths
+  per filter). SkyCompositeWorker builds a multi-detector mosaic from the filter
+  with the most files using `reproject.mosaicking.find_optimal_celestial_wcs` and
+  `reproject_and_coadd`. Falls back to a single tile if mosaicking fails.
+  Tiles are downsampled 4x via strided slicing in `_load_tiles` with matching
+  WCS adjustments (CRPIX scaled, CD matrix or CDELT scaled by 4) to reduce
+  memory and compute.
+- SessionLogHandler now uses `self.format(record)` instead of
+  `record.getMessage()`, so exception tracebacks appear in the LogBar.
+- GUI launch adds a `logging.FileHandler` at `data/parallax.log` (truncated
+  each launch, DEBUG level) so all log output including tracebacks is captured
+  to disk.
+- Fixed LogBar message duplication: progress events were reaching the log bar
+  through both the logging handler signal and a direct `append()` call in
+  `_on_progress`. Removed the redundant direct call.
+- Fixed selection marker crash: `_draw_selection_marker` used `ax.scatter`
+  whose `PathCollection.remove()` raises `NotImplementedError` in current
+  matplotlib. Replaced with `ax.plot` returning a `Line2D`, which removes
+  cleanly.
+- Removed sky composite downsampling and its broken WCS adjustment. The
+  `_downsample` helper patched `crpix`/`cdelt` without updating the PC matrix,
+  producing incorrect marker positions on JWST images. Full-resolution arrays
+  are now passed through to the display.
+- Sky view uses plain axes with WCS-derived RA/Dec tick labels instead of
+  WCSAxes projection, avoiding conflicts between WCSAxes and manual axis limit
+  control. Zoom, pan, and `set_xlim`/`set_ylim` operate in pixel coordinates.
+- Initial draw shows the full image extent from `imshow` defaults.
+  `invert_xaxis()` runs after marker overlay but before limits are captured,
+  so Reset restores the full inverted view.
+- Replaced `tight_layout()` with fixed `subplots_adjust` margins to eliminate
+  layout warnings.
+- Right-click drag panning on the sky view. Press captures display-pixel
+  coordinates and current axis limits; move computes the pixel delta and
+  converts to data units via `transData.inverted()` to avoid jitter from
+  shifting data coordinates; release ends the pan.
+- Fixed stale `_selected_marker` reference after `fig.clear()`:
+  `_draw_wcs_view` now clears the marker before clearing the figure,
+  preventing `.remove()` calls on a dead artist.
+- Fixed overlay refreshes (bookmark toggle, viewed tag) resetting the zoom
+  level. `_draw_wcs_view` now captures axis limits before redraw and
+  restores them after when the view has already been drawn once.
+- Fixed WCS downsampling in `_load_tiles`: NIRCam i2d files use a CD matrix
+  for pixel scale, not CDELT. The code now checks `wcs.wcs.has_cd()` and
+  scales the CD matrix by 4 when present, falling back to CDELT scaling
+  otherwise. CRPIX adjustment corrected to `(old - 1) / 4 + 1` per axis.
+  This fixes incorrect `all_world2pix` marker placement on CD-matrix tiles.
+- Zoom level indicator in WCS sky view: a text label in the lower-left corner
+  shows the current zoom ratio (e.g. "2.3x") when zoomed in or out. Hidden
+  at 1.0x. Updates on scroll, zoom buttons, pan release, and reset. Not shown
+  in scatter fallback mode.
+
 ## 1.3.1
 
 - `local_rms` field added to Detection dataclass, persisted to DB and JSON.

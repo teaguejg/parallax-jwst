@@ -16,19 +16,7 @@ from parallax.gui.panels.detail import DetailPanel
 from parallax.gui.panels.reports import ReportsPanel
 from parallax.gui.panels.settings import SettingsPanel
 from parallax.gui.panels.inspect import InspectWindow
-
-def _normalize_target(name: str) -> str:
-    if not name:
-        return name
-    prefixes = ["Ngc", "Ic", "Hd", "Hr", "Bd", "Pgc", "Ugc", "Mcg"]
-    parts = name.strip().split()
-    if parts and parts[0] in prefixes:
-        parts[0] = parts[0].upper()
-    elif parts:
-        lower_prefixes = [p.lower() for p in prefixes]
-        if parts[0].lower() in lower_prefixes:
-            parts[0] = parts[0].upper()
-    return " ".join(parts)
+from parallax.archive import _normalize_target
 
 
 _STAGE_PCT = {
@@ -164,7 +152,6 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, step, detail):
         self._toolbar.set_progress(step, detail)
-        self._log_bar.append(f"{step}: {detail}")
 
         if step == "detect":
             # spread detect from 20 to 60
@@ -243,10 +230,27 @@ class MainWindow(QMainWindow):
 
 
 def launch():
+    import os
     import sys
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
+
+    try:
+        from parallax.config import config
+        log_path = config.get("log.path") or "data/parallax.log"
+    except Exception:
+        log_path = "data/parallax.log"
+
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+    ))
+    logging.getLogger("parallax").addHandler(fh)
+    logging.getLogger("parallax").setLevel(logging.DEBUG)
+
     window = MainWindow()
     window.setWindowTitle("Parallax")
     window.resize(1200, 800)
