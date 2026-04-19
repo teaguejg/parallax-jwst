@@ -1764,3 +1764,57 @@ class TestHintsMarkdownFormat:
         assert "**cnd_fmt001** - Hints:" in content
         # no double bold
         assert "**Hints:**" not in content
+
+
+class TestMagAbZeroPoint:
+    def test_mag_ab_uses_mjy_zeropoint(self, tmp_db):
+        """mag_ab is computed with 0.003631 MJy (not 3631 Jy) as the AB zeropoint."""
+        import math
+        pixar_sr = 1.0  # 1 sr/px - artificial but forces finite, testable mag values
+        hdul = make_fits(n_sources=5, noise=0.01, pixar_sr=pixar_sr)
+        path = os.path.join(tmp_db, "ab_test.fits")
+        hdul.writeto(path, overwrite=True)
+
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.0, min_pixels=1)
+
+        checked = 0
+        for s in results:
+            if s["flux_mjy"] is not None and s["mag_ab"] is not None:
+                expected = round(-2.5 * math.log10(s["flux_mjy"] / 0.003631), 4)
+                assert s["mag_ab"] == expected, (
+                    f"mag_ab {s['mag_ab']} != expected {expected}; flux_mjy={s['flux_mjy']}"
+                )
+                # sanity: old divisor (3631 Jy) would give a value ~15 mag different
+                buggy = round(-2.5 * math.log10(s["flux_mjy"] / 3631.0), 4)
+                assert abs(s["mag_ab"] - buggy) > 10
+                checked += 1
+        assert checked >= 1, "no source had both flux_mjy and mag_ab set"
+
+
+class TestMinPixelsDefault:
+    def test_min_pixels_default_is_5(self):
+        """detection.min_pixels default must be 5 to catch NIRCam SW point sources."""
+        from parallax.config import _DEFAULTS
+        assert _DEFAULTS["detection"]["min_pixels"] == 5
+
+
+class TestDetectionCacheVersionTag:
+    def test_different_version_tag_produces_different_hash(self, tmp_db):
+        """_fits_hash includes _CACHE_VERSION so bumping it invalidates prior entries."""
+        import parallax.survey as _survey
+
+        hdul = make_fits(n_sources=3, noise=0.05)
+        path = os.path.join(tmp_db, "cache_tag_test.fits")
+        hdul.writeto(path, overwrite=True)
+
+        h1 = _survey._fits_hash(path, snr_threshold=3.0, min_pixels=5, kernel_fwhm=2.0)
+
+        original = _survey._CACHE_VERSION
+        try:
+            _survey._CACHE_VERSION = "v999"
+            h2 = _survey._fits_hash(path, snr_threshold=3.0, min_pixels=5, kernel_fwhm=2.0)
+        finally:
+            _survey._CACHE_VERSION = original
+
+        assert h1 != h2

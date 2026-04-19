@@ -12,7 +12,7 @@ _DEFAULTS = {
     },
     "detection": {
         "snr_threshold": 3.0,
-        "min_pixels": 25,
+        "min_pixels": 5,
         "cutout_padding": 20,
         "kernel_fwhm": 2.0,
         "cutout_size": 60,
