@@ -1,0 +1,40 @@
+cache:
+  candidate_match_radius_arcsec: 2.0
+  catalog_enabled: true
+  catalog_ttl_days: 30
+  detection_enabled: true
+data:
+  archive_path: data/archive
+  db_path: data/parallax.db
+  download_path: data/downloads
+  processed_path: data/processed
+  reports_path: data/reports
+detection:
+  background_box_size: 25
+  background_box_size_2: 0
+  background_filter_size: 3
+  background_interp: zoom
+  cutout_padding: 20
+  cutout_size: 60
+  kernel_fwhm: 2.0
+  min_pixels: 5
+  snr_threshold: 3.0
+log:
+  max_runs: 10
+  path: data/parallax.log
+mast:
+  calib_level: 3
+  instruments:
+  - NIRCAM
+  - MIRI
+  product_type: IMAGE
+report:
+  include_known: false
+  output_format: both
+resolver:
+  catalogs:
+  - SIMBAD
+  - NED
+  - GAIA
+  search_radius_arcsec: 2.0
+  timeout_seconds: 30
