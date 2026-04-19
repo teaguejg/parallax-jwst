@@ -1,5 +1,13 @@
 # Changes
 
+## 1.4.1
+
+- AB magnitudes were 15 mag too faint due to a unit conversion error. Fixed.
+- Default minimum detection area changed from 25 to 5 pixels, allowing NIRCam
+  short-wavelength point sources to be detected.
+- Detection cache invalidated to ensure results reflect the corrected
+  calculations.
+
 ## 1.4.0
 
 - Target name normalization now handles lowercase catalog prefixes (e.g.

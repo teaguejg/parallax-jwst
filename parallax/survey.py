@@ -26,6 +26,8 @@ from parallax.acquisition import acquire
 
 logger = logging.getLogger(__name__)
 
+_CACHE_VERSION = "v1"
+
 
 def _find_science_hdu(hdul):
     # prefer named SCI extension (JWST i2d format)
@@ -47,7 +49,7 @@ def _fits_hash(fits_path, snr_threshold, min_pixels, kernel_fwhm):
     box_size_2 = config.get("detection.background_box_size_2", 0)
     filter_size = config.get("detection.background_filter_size", 3)
     interp_mode = config.get("detection.background_interp", "zoom")
-    key = f"{fits_path}:{mtime}:{snr_threshold}:{min_pixels}:{kernel_fwhm}:{box_size}:{box_size_2}:{filter_size}:{interp_mode}"
+    key = f"{fits_path}:{mtime}:{snr_threshold}:{min_pixels}:{kernel_fwhm}:{box_size}:{box_size_2}:{filter_size}:{interp_mode}:{_CACHE_VERSION}"
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
@@ -316,7 +318,7 @@ def detect(
             if pixar_sr is not None and pixar_sr > 0 and flux_val > 0:
                 flux_mjy_val = flux_val * float(pixar_sr)
                 try:
-                    mag_ab_val = round(-2.5 * math.log10(flux_mjy_val / 3631.0), 4)
+                    mag_ab_val = round(-2.5 * math.log10(flux_mjy_val / 0.003631), 4)
                 except Exception:
                     mag_ab_val = None
 
