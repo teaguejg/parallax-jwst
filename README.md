@@ -53,13 +53,12 @@ All settings live in `config.yaml` in the project root. Key knobs:
 
 - `detection.snr_threshold` (default 3.0) - minimum signal-to-noise for a
   detection. Lower finds fainter sources but more noise.
-- `detection.min_pixels` (default 25) - minimum connected pixels per source.
-  Filters hot pixels and cosmic rays.
+- `detection.min_pixels` (default 5) - minimum connected pixel area for a
+  source to be reported. Raise to suppress noise detections.
 - `detection.background_box_size` (default 50) - background estimation tile
   size. Smaller values (20-25) work better near bright extended emission.
 - `resolver.search_radius_arcsec` (default 2.0) - catalog cross-match radius.
   Increase if WCS alignment is imprecise.
-- `resolver.catalogs` (default [SIMBAD, NED, GAIA]) - which catalogs to query.
 
 Environment variables override config values using the prefix `PARALLAX_` with
 underscores between segments (e.g. `PARALLAX_DETECTION_SNR_THRESHOLD=5.0`).
