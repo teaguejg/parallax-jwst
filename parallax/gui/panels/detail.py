@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QTableWidget,
     QTableWidgetItem, QLineEdit, QPlainTextEdit, QPushButton,
-    QInputDialog, QHeaderView,
+    QInputDialog, QHeaderView, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -20,11 +20,24 @@ class DetailPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
+        self._btn_container = QWidget()
+        self._btn_layout = QHBoxLayout(self._btn_container)
+        self._btn_layout.setContentsMargins(4, 4, 4, 0)
+        self._btn_container.setVisible(False)
+        outer.addWidget(self._btn_container)
+
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer.addWidget(self._scroll)
 
         self._inner = QWidget()
+        # Ignored horizontal policy tells the scroll area to size _inner to
+        # the viewport width regardless of child sizeHints (long labels would
+        # otherwise push _inner wider than the viewport, breaking Stretch columns).
+        self._inner.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._layout = QVBoxLayout(self._inner)
         self._scroll.setWidget(self._inner)
 
@@ -41,12 +54,14 @@ class DetailPanel(QWidget):
     def show_idle(self, _from_button=False):
         self._clear_layout()
         self._current_id = None
+        self._btn_container.setVisible(False)
         if _from_button:
             self.candidate_closed.emit()
 
     def show_hint(self):
         self._clear_layout()
         self._current_id = None
+        self._btn_container.setVisible(False)
         self._layout.addWidget(QLabel("Select a candidate"))
 
     def load(self, candidate_id):
@@ -63,8 +78,10 @@ class DetailPanel(QWidget):
             self._layout.addWidget(QLabel("Candidate not found"))
             return
 
-        close_row = QHBoxLayout()
-        close_row.addStretch()
+        while self._btn_layout.count():
+            item = self._btn_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
         is_bookmarked = "bookmarked" in (cand.tags or [])
         bm_btn = QPushButton("Bookmarked" if is_bookmarked else "Bookmark")
@@ -75,7 +92,6 @@ class DetailPanel(QWidget):
         else:
             bm_btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         bm_btn.clicked.connect(lambda: self._toggle_bookmark(candidate_id, is_bookmarked))
-        close_row.addWidget(bm_btn)
 
         is_viewed = "viewed" in (cand.tags or [])
         viewed_btn = QPushButton("Viewed" if is_viewed else "Mark viewed")
@@ -86,16 +102,17 @@ class DetailPanel(QWidget):
         else:
             viewed_btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         viewed_btn.clicked.connect(lambda: self._toggle_viewed(candidate_id, is_viewed))
-        close_row.addWidget(viewed_btn)
 
         close_btn = QPushButton("X")
         close_btn.setFixedSize(22, 22)
         close_btn.setStyleSheet("font-size: 11px; padding: 0;")
         close_btn.clicked.connect(lambda: self.show_idle(_from_button=True))
-        close_row.addWidget(close_btn)
-        row_w = QWidget()
-        row_w.setLayout(close_row)
-        self._layout.addWidget(row_w)
+
+        self._btn_layout.addStretch()
+        self._btn_layout.addWidget(bm_btn)
+        self._btn_layout.addWidget(viewed_btn)
+        self._btn_layout.addWidget(close_btn)
+        self._btn_container.setVisible(True)
 
         self._layout.addWidget(QLabel(f"ID: {cand.id}"))
         color = _CLS_COLORS.get(cand.classification, "#000000")
@@ -138,51 +155,59 @@ class DetailPanel(QWidget):
         if auto:
             tags_label = QLabel("Flags: " + "  ".join(auto))
             tags_label.setStyleSheet("color: #888; font-size: 10px;")
+            tags_label.setWordWrap(True)
             self._layout.addWidget(tags_label)
 
         if cand.hints:
             hints_label = QLabel("Hints: " + ", ".join(cand.hints))
             hints_label.setStyleSheet("color: #888; font-size: 10px;")
+            hints_label.setWordWrap(True)
             self._layout.addWidget(hints_label)
 
         if cand.detections:
             self._layout.addWidget(QLabel("Detections"))
-            tbl = QTableWidget(len(cand.detections), 5)
-            tbl.setHorizontalHeaderLabels(["Filter", "SNR", "Flux", "Flux(MJy)", "Mag(AB)"])
-            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            tbl.setMaximumHeight(30 + 25 * len(cand.detections))
+            tbl = QTableWidget(len(cand.detections), 3)
+            tbl.setHorizontalHeaderLabels(["Filter", "SNR", "Mag(AB)"])
+            tbl.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch)
+            tbl.verticalHeader().setVisible(False)
             dets_sorted = sorted(cand.detections, key=lambda d: d.snr, reverse=True)
             for i, det in enumerate(dets_sorted):
                 tbl.setItem(i, 0, QTableWidgetItem(det.filter))
                 tbl.setItem(i, 1, QTableWidgetItem(f"{det.snr:.2f}"))
-                tbl.setItem(i, 2, QTableWidgetItem(f"{det.flux:.2f}"))
+                tbl.setItem(i, 2, QTableWidgetItem(
+                    f"{det.mag_ab:.2f}" if det.mag_ab is not None else "-"))
+                parts = [f"Flux: {det.flux:.2f}"]
                 if det.flux_mjy is not None:
-                    fmjy = f"{det.flux_mjy:.3e}"
+                    s = f"Flux(MJy): {det.flux_mjy:.3e}"
                     if det.flux_mjy_err is not None:
-                        fmjy += f" +/- {det.flux_mjy_err:.3e}"
-                else:
-                    fmjy = "-"
-                if det.mag_ab is not None:
-                    mab = f"{det.mag_ab:.2f}"
-                    if det.mag_ab_err is not None:
-                        mab += f" +/- {det.mag_ab_err:.4f}"
-                else:
-                    mab = "-"
-                tbl.setItem(i, 3, QTableWidgetItem(fmjy))
-                tbl.setItem(i, 4, QTableWidgetItem(mab))
+                        s += f" +/- {det.flux_mjy_err:.3e}"
+                    parts.append(s)
+                if det.mag_ab is not None and det.mag_ab_err is not None:
+                    parts.append(f"Mag err: +/- {det.mag_ab_err:.4f}")
+                tip = "\n".join(parts)
+                for col in range(3):
+                    item = tbl.item(i, col)
+                    if item:
+                        item.setToolTip(tip)
+            content_h = 30 + 25 * len(cand.detections)
+            tbl.setFixedHeight(min(content_h, 200))
             self._layout.addWidget(tbl)
 
         if cand.catalog_matches:
             self._layout.addWidget(QLabel("Catalog Matches"))
             tbl = QTableWidget(len(cand.catalog_matches), 4)
             tbl.setHorizontalHeaderLabels(["Catalog", "ID", "Sep(\")", "Type"])
-            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            tbl.setMaximumHeight(30 + 25 * len(cand.catalog_matches))
+            tbl.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch)
+            tbl.verticalHeader().setVisible(False)
             for i, m in enumerate(cand.catalog_matches):
                 tbl.setItem(i, 0, QTableWidgetItem(m.catalog))
                 tbl.setItem(i, 1, QTableWidgetItem(m.source_id))
                 tbl.setItem(i, 2, QTableWidgetItem(f"{m.separation_arcsec:.2f}"))
                 tbl.setItem(i, 3, QTableWidgetItem(m.object_type or ""))
+            content_h = 30 + 25 * len(cand.catalog_matches)
+            tbl.setFixedHeight(min(content_h, 200))
             self._layout.addWidget(tbl)
 
         self._layout.addWidget(QLabel("Tags"))

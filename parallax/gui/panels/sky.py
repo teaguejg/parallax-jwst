@@ -264,7 +264,11 @@ class SkyPanel(QWidget):
         self._wcs_mode = False
         self._sky_worker = None
         self._pending_report = None
-        self._known_visible = False
+        self._layer_vis = {
+            "unverified": True, "known": False,
+            "bookmarked": True, "viewed": False,
+            "conf_high": True, "conf_med": True, "conf_low": True,
+        }
 
         self.show_idle()
 
@@ -361,8 +365,21 @@ class SkyPanel(QWidget):
         self._fig.clear()
         self._ax = self._fig.add_subplot(111)
 
+        from PyQt6.QtWidgets import QApplication
+        palette = QApplication.instance().palette()
+        bg = palette.color(palette.ColorRole.Window)
+        bg_hex = bg.name()
+        self._fig.set_facecolor(bg_hex)
+        self._ax.set_facecolor("#1a1a1a")
+        lightness = bg.lightness()
+        txt_color = "white" if lightness < 128 else "black"
+        self._ax.tick_params(colors=txt_color)
+        self._ax.xaxis.label.set_color(txt_color)
+        self._ax.yaxis.label.set_color(txt_color)
+        self._ax.title.set_color(txt_color)
+
         self._ax.imshow(self._sky_image, origin="lower", cmap="gray_r",
-                        interpolation="nearest")
+                        interpolation="nearest", aspect="auto")
         self._ax.set_xlabel("RA")
         self._ax.set_ylabel("Dec")
         self._set_wcs_ticks()
@@ -373,13 +390,44 @@ class SkyPanel(QWidget):
             self._ax.set_title(f"{rpt.target}  {date_str}", fontsize=10)
 
         self._overlay_markers_wcs()
+
+        try:
+            h, w = self._sky_image.shape[:2]
+            cx, cy = w / 2, h / 2
+            ra_c, dec_c = self._sky_wcs.all_pix2world([cx], [cy], 0)
+            px_n, py_n = self._sky_wcs.all_world2pix(
+                [float(ra_c[0])], [float(dec_c[0]) + 0.01], 0)
+            dx = float(px_n[0]) - cx
+            dy = float(py_n[0]) - cy
+            length = (dx ** 2 + dy ** 2) ** 0.5
+            if length > 0:
+                dx, dy = dx / length, dy / length
+                arrow_len = 0.06
+                base_x, base_y = 0.93, 0.08
+                tip_x = base_x + dx * arrow_len
+                tip_y = base_y + dy * arrow_len
+                self._ax.annotate(
+                    '', xy=(tip_x, tip_y), xytext=(base_x, base_y),
+                    xycoords='axes fraction', textcoords='axes fraction',
+                    arrowprops=dict(arrowstyle='->', color='white', lw=1.5),
+                    zorder=20,
+                )
+                self._ax.text(
+                    tip_x + dx * 0.02, tip_y + dy * 0.02, 'N',
+                    transform=self._ax.transAxes,
+                    ha='center', va='center', fontsize=9,
+                    color='white', fontweight='bold', zorder=20,
+                )
+        except Exception:
+            pass
+
         self._ax.invert_xaxis()
 
         self._original_xlim = self._ax.get_xlim()
         self._original_ylim = self._ax.get_ylim()
         self._zoom_label = self._ax.text(
-            0.01, 0.01, '', transform=self._ax.transAxes,
-            ha='left', va='bottom', fontsize=8, color='white', zorder=20,
+            0.99, 0.01, '', transform=self._ax.transAxes,
+            ha='right', va='bottom', fontsize=8, color='white', zorder=20,
         )
         self._fig.subplots_adjust(left=0.15, right=0.95, top=0.93, bottom=0.12)
         self._canvas.draw()
@@ -412,7 +460,7 @@ class SkyPanel(QWidget):
 
         vis_candidates = []
         for c in self._candidates:
-            if c.classification == "known" and not self._known_visible:
+            if not self._is_visible(c):
                 continue
             vis_candidates.append(c)
 
@@ -427,42 +475,107 @@ class SkyPanel(QWidget):
         except Exception:
             return
 
+        bkt_x = {"known": [], "high": [], "med": [], "low": [], "bm": [], "vw": []}
+        bkt_y = {"known": [], "high": [], "med": [], "low": [], "bm": [], "vw": []}
+        bkt_s = {"known": [], "high": [], "med": [], "low": [], "bm": [], "vw": []}
+
         for i, c in enumerate(vis_candidates):
             px, py = float(pxs[i]), float(pys[i])
             if px < -50 or py < -50 or px >= w + 50 or py >= h + 50:
                 continue
+
             if c.classification == "known":
-                color = _COLORS["known"]
                 ms = max(3, min(c.snr * 0.6, 10))
-                alpha = 0.6
+                main = "known"
             else:
-                color = _conf_color(c.confidence)
                 ms = max(3, min(c.snr * 0.8, 15))
-                alpha = 0.8
+                conf = c.confidence
+                if conf >= 0.75:
+                    main = "high"
+                elif conf >= 0.50:
+                    main = "med"
+                else:
+                    main = "low"
 
-            is_bm = "bookmarked" in (c.tags or [])
-            is_vw = "viewed" in (c.tags or [])
+            bkt_x[main].append(px)
+            bkt_y[main].append(py)
+            bkt_s[main].append(ms ** 2)
 
-            if is_bm:
-                self._ax.plot(px, py, 'o', markersize=ms + 2,
-                              markerfacecolor='none', markeredgecolor='#f1c40f',
-                              markeredgewidth=1.2, zorder=6, alpha=0.9)
-            if is_vw:
-                self._ax.plot(px, py, 'o', markersize=ms - 1,
-                              markerfacecolor='none', markeredgecolor='#27ae60',
-                              markeredgewidth=1.0, zorder=5, alpha=0.8)
+            tags = c.tags or []
+            if "bookmarked" in tags:
+                bkt_x["bm"].append(px)
+                bkt_y["bm"].append(py)
+                bkt_s["bm"].append((ms + 2) ** 2)
+            if "viewed" in tags:
+                bkt_x["vw"].append(px)
+                bkt_y["vw"].append(py)
+                bkt_s["vw"].append(max(1, ms - 1) ** 2)
 
-            self._ax.plot(px, py, 'o', markersize=ms,
-                          markerfacecolor='none', markeredgecolor=color,
-                          markeredgewidth=1.0, zorder=4, alpha=alpha)
+        for key, color, alpha in (
+            ("known", _COLORS["known"], 0.6),
+            ("high",  "#c0392b",        0.8),
+            ("med",   "#e67e22",        0.8),
+            ("low",   "#7f8c8d",        0.8),
+        ):
+            if bkt_x[key]:
+                self._ax.scatter(bkt_x[key], bkt_y[key], s=bkt_s[key],
+                                 facecolors="none", edgecolors=color,
+                                 linewidths=1.0, alpha=alpha, zorder=4)
+
+        if bkt_x["vw"]:
+            self._ax.scatter(bkt_x["vw"], bkt_y["vw"], s=bkt_s["vw"],
+                             facecolors="none", edgecolors="#27ae60",
+                             linewidths=1.0, alpha=0.8, zorder=5)
+
+        if bkt_x["bm"]:
+            self._ax.scatter(bkt_x["bm"], bkt_y["bm"], s=bkt_s["bm"],
+                             facecolors="none", edgecolors="#f1c40f",
+                             linewidths=1.2, alpha=0.9, zorder=6)
+
+        legend_items = []
+        if self._layer_vis.get("unverified"):
+            if self._layer_vis.get("conf_high", True):
+                legend_items.append(("unverified (high)", "#c0392b"))
+            if self._layer_vis.get("conf_med", True):
+                legend_items.append(("unverified (med)", "#e67e22"))
+            if self._layer_vis.get("conf_low", True):
+                legend_items.append(("unverified (low)", "#7f8c8d"))
+        if self._layer_vis.get("known"):
+            legend_items.append(("known", "#4a90d9"))
+        if self._layer_vis.get("bookmarked"):
+            legend_items.append(("bookmarked", "#f1c40f"))
+        if self._layer_vis.get("viewed"):
+            legend_items.append(("viewed", "#27ae60"))
+
+        for label, color in legend_items:
+            self._ax.scatter([], [], s=40, facecolors="none",
+                             edgecolors=color, linewidths=1.0,
+                             label=label)
+        if legend_items:
+            self._ax.legend(fontsize=7, loc="upper right",
+                            framealpha=0.5, edgecolor="none")
 
     def _draw_scatter(self):
         self._fig.clear()
         self._ax = self._fig.add_subplot(111)
         self._wcs_mode = False
 
+        from PyQt6.QtWidgets import QApplication
+        palette = QApplication.instance().palette()
+        bg = palette.color(palette.ColorRole.Window)
+        bg_hex = bg.name()
+        self._fig.set_facecolor(bg_hex)
+        self._ax.set_facecolor(bg_hex)
+        lightness = bg.lightness()
+        txt_color = "white" if lightness < 128 else "black"
+        self._ax.tick_params(colors=txt_color)
+        self._ax.xaxis.label.set_color(txt_color)
+        self._ax.yaxis.label.set_color(txt_color)
+        self._ax.title.set_color(txt_color)
+
         for cls, color in _COLORS.items():
-            subset = [c for c in self._candidates if c.classification == cls]
+            subset = [c for c in self._candidates
+                      if c.classification == cls and self._is_visible(c)]
             if not subset:
                 continue
             ras = [c.ra for c in subset]
@@ -475,8 +588,6 @@ class SkyPanel(QWidget):
                     label=cls, alpha=0.6, edgecolors="none", linewidth=0,
                 )
                 self._scatter_known = sc
-                sc.set_visible(self._known_visible)
-                sc.set_label("known" if self._known_visible else "known (hidden)")
             else:
                 sizes = np.clip(snrs * 10, 20, 200)
                 colors = [_conf_color(c.confidence) for c in subset]
@@ -494,7 +605,8 @@ class SkyPanel(QWidget):
             self._ax.scatter([], [], s=40, c=lc,
                              label=label, edgecolors="k", linewidth=0.5)
 
-        bm = [c for c in self._candidates if "bookmarked" in (c.tags or [])]
+        bm = [c for c in self._candidates
+              if "bookmarked" in (c.tags or []) and self._is_visible(c)]
         if bm:
             bm_ras = [c.ra for c in bm]
             bm_decs = [c.dec for c in bm]
@@ -506,7 +618,8 @@ class SkyPanel(QWidget):
                 linewidth=1.0, zorder=5,
             )
 
-        vw = [c for c in self._candidates if "viewed" in (c.tags or [])]
+        vw = [c for c in self._candidates
+              if "viewed" in (c.tags or []) and self._is_visible(c)]
         if vw:
             vw_ras = [c.ra for c in vw]
             vw_decs = [c.dec for c in vw]
@@ -540,17 +653,37 @@ class SkyPanel(QWidget):
         self._fig.tight_layout()
         self._canvas.draw()
 
-    def set_known_visible(self, visible):
-        self._known_visible = visible
+    def _is_visible(self, c):
+        tags = c.tags or []
+        is_bm = "bookmarked" in tags
+        is_vw = "viewed" in tags
+
+        if is_bm and self._layer_vis.get("bookmarked"):
+            return True
+        if is_vw and self._layer_vis.get("viewed"):
+            return True
+        if c.classification == "known":
+            return self._layer_vis.get("known", False)
+        # unverified with no bookmarked/viewed tags
+        if not is_bm and not is_vw:
+            if not self._layer_vis.get("unverified", False):
+                return False
+            conf = c.confidence
+            if conf >= 0.75:
+                return self._layer_vis.get("conf_high", True)
+            elif conf >= 0.50:
+                return self._layer_vis.get("conf_med", True)
+            else:
+                return self._layer_vis.get("conf_low", True)
+        return False
+
+    def set_layer_visibility(self, layers):
+        self._layer_vis = dict(layers)
         if self._wcs_mode:
             self._draw_wcs_view()
-            return
-        if self._scatter_known is None:
-            return
-        self._scatter_known.set_visible(visible)
-        self._scatter_known.set_label("known" if visible else "known (hidden)")
-        self._ax.legend(fontsize=8, loc="upper right")
-        self._canvas.draw()
+        elif self._scatter_known is not None:
+            # scatter mode: redraw fully
+            self._draw_scatter()
 
     def _on_scroll(self, event):
         if event.inaxes != self._ax:
@@ -569,12 +702,17 @@ class SkyPanel(QWidget):
 
         new_w = (xlim[1] - xlim[0]) * scale
         new_h = (ylim[1] - ylim[0]) * scale
+        if self._original_xlim is not None:
+            orig_w = abs(self._original_xlim[1] - self._original_xlim[0])
+            orig_h = abs(self._original_ylim[1] - self._original_ylim[0])
+            if new_w > orig_w or new_h > orig_h:
+                return
         relx = (xdata - xlim[0]) / (xlim[1] - xlim[0])
         rely = (ydata - ylim[0]) / (ylim[1] - ylim[0])
 
         self._ax.set_xlim(xdata - new_w * relx, xdata + new_w * (1 - relx))
         self._ax.set_ylim(ydata - new_h * rely, ydata + new_h * (1 - rely))
-        self._canvas.draw()
+        self._canvas.draw_idle()
         self._update_zoom_label()
 
     def _apply_zoom(self, scale):
@@ -596,9 +734,14 @@ class SkyPanel(QWidget):
             cy = (ylim[0] + ylim[1]) / 2
         hw = (xlim[1] - xlim[0]) * scale / 2
         hh = (ylim[1] - ylim[0]) * scale / 2
+        if self._original_xlim is not None:
+            orig_hw = abs(self._original_xlim[1] - self._original_xlim[0]) / 2
+            orig_hh = abs(self._original_ylim[1] - self._original_ylim[0]) / 2
+            if hw > orig_hw or hh > orig_hh:
+                return
         self._ax.set_xlim(cx - hw, cx + hw)
         self._ax.set_ylim(cy - hh, cy + hh)
-        self._canvas.draw()
+        self._canvas.draw_idle()
         self._update_zoom_label()
 
     def _zoom_in(self):
@@ -611,7 +754,7 @@ class SkyPanel(QWidget):
         if self._original_xlim is not None:
             self._ax.set_xlim(self._original_xlim)
             self._ax.set_ylim(self._original_ylim)
-            self._canvas.draw()
+            self._canvas.draw_idle()
         self._update_zoom_label()
 
     def _update_zoom_label(self):
@@ -624,7 +767,7 @@ class SkyPanel(QWidget):
             self._zoom_label.set_text('')
         else:
             self._zoom_label.set_text(f'{ratio:.1f}x')
-        self._canvas.draw()
+        self._canvas.draw_idle()
 
     def _candidate_at_event(self, event):
         if not self._candidates:
@@ -634,7 +777,7 @@ class SkyPanel(QWidget):
         best_dist = float("inf")
 
         for c in self._candidates:
-            if c.classification == "known" and not self._known_visible:
+            if not self._is_visible(c):
                 continue
 
             if self._wcs_mode and self._sky_wcs is not None:
@@ -685,7 +828,7 @@ class SkyPanel(QWidget):
             if self._selected_marker is not None:
                 self._selected_marker.remove()
                 self._selected_marker = None
-                self._canvas.draw()
+                self._canvas.draw_idle()
             self.candidate_deselected.emit()
 
     def _on_mouse_move(self, event):
@@ -700,7 +843,7 @@ class SkyPanel(QWidget):
         dy_data = delta[1] - origin[1]
         self._ax.set_xlim(self._pan_xlim[0] - dx_data, self._pan_xlim[1] - dx_data)
         self._ax.set_ylim(self._pan_ylim[0] - dy_data, self._pan_ylim[1] - dy_data)
-        self._canvas.draw()
+        self._canvas.draw_idle()
 
     def _on_mouse_release(self, event):
         if event.button == 3:
@@ -725,14 +868,14 @@ class SkyPanel(QWidget):
             markerfacecolor='none', markeredgecolor='white',
             markeredgewidth=2, zorder=10, linestyle='none',
         )[0]
-        self._canvas.draw()
+        self._canvas.draw_idle()
 
     def deselect(self):
         self._selected_candidate = None
         if self._selected_marker is not None:
             self._selected_marker.remove()
             self._selected_marker = None
-            self._canvas.draw()
+            self._canvas.draw_idle()
         self.candidate_deselected.emit()
 
     def refresh_overlays(self):
@@ -780,7 +923,7 @@ class SkyPanel(QWidget):
             )
 
         self._ax.legend(fontsize=8, loc="upper right")
-        self._canvas.draw()
+        self._canvas.draw_idle()
 
     def select_candidate(self, candidate_id):
         cand = None
@@ -812,7 +955,7 @@ class SkyPanel(QWidget):
             hh = (ylim[1] - ylim[0]) / 2
             self._ax.set_xlim(cx - hw, cx + hw)
             self._ax.set_ylim(cy - hh, cy + hh)
-            self._canvas.draw()
+            self._canvas.draw_idle()
 
         self.candidate_selected.emit(candidate_id)
 
@@ -827,4 +970,4 @@ class SkyPanel(QWidget):
         self._sky_wcs = None
         self._sky_image = None
         self._wcs_mode = False
-        self._canvas.draw()
+        self._canvas.draw_idle()

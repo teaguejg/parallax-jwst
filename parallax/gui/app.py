@@ -118,7 +118,7 @@ class MainWindow(QMainWindow):
             self.restoreState(state)
 
         self._toolbar.run_requested.connect(self._on_run)
-        self._toolbar.toggle_known.connect(self._sky.set_known_visible)
+        self._toolbar.layers_changed.connect(self._sky.set_layer_visibility)
         self._toolbar.settings_requested.connect(self._show_settings)
         self._sky.candidate_selected.connect(self._detail.load)
         self._sky.candidate_deselected.connect(self._detail.show_hint)
@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self._toolbar.clear_progress()
         self._reports.refresh()
         self._sky.load_report(report)
-        self._sky.set_known_visible(self._toolbar.known_checkbox.isChecked())
+        self._sky.set_layer_visibility(self._toolbar.get_layer_state())
         self._detail.show_hint()
 
     def _on_run_failed(self, message):
@@ -181,7 +181,7 @@ class MainWindow(QMainWindow):
         report = par.archive.get_report(report_id)
         if report:
             self._sky.load_report(report)
-            self._sky.set_known_visible(self._toolbar.known_checkbox.isChecked())
+            self._sky.set_layer_visibility(self._toolbar.get_layer_state())
             self._detail.show_hint()
 
     def _on_candidate_inspected(self, candidate_id):
@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
             report = par.archive.get_report(cand.report_id)
             if report:
                 self._sky.load_report(report)
-                self._sky.set_known_visible(self._toolbar.known_checkbox.isChecked())
+                self._sky.set_layer_visibility(self._toolbar.get_layer_state())
 
         self._sky.select_candidate(cand.id)
         self._detail.load(cand.id)

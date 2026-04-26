@@ -63,6 +63,142 @@ def add(candidate: Candidate) -> str:
     return candidate.id
 
 
+def add_batch(candidates) -> int:
+    """Persist multiple candidates in one transaction. Duplicates are skipped silently."""
+    if not candidates:
+        return 0
+
+    inserted = 0
+    with get_db() as conn:
+        for candidate in candidates:
+            existing = conn.execute("SELECT id FROM candidates WHERE id = ?",
+                                   (candidate.id,)).fetchone()
+            if existing:
+                continue
+
+            conn.execute(
+                "INSERT INTO candidates (id, ra, dec, flux, snr, classification, "
+                "report_id, pixel_x, pixel_y, created_at, tags, notes, confidence, "
+                "flux_err, flux_mjy_err, mag_ab_err, hints) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (candidate.id, candidate.ra, candidate.dec, candidate.flux,
+                 candidate.snr, candidate.classification, candidate.report_id,
+                 candidate.pixel_coords[0], candidate.pixel_coords[1],
+                 candidate.created_at.isoformat() if isinstance(candidate.created_at, datetime) else candidate.created_at,
+                 json.dumps(candidate.tags), json.dumps(candidate.notes),
+                 candidate.confidence,
+                 candidate.flux_err, candidate.flux_mjy_err, candidate.mag_ab_err,
+                 json.dumps(candidate.hints))
+            )
+
+            for m in candidate.catalog_matches:
+                conn.execute(
+                    "INSERT INTO catalog_matches (candidate_id, catalog, source_id, "
+                    "separation_arcsec, object_type, redshift, data) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (candidate.id, m.catalog, m.source_id, m.separation_arcsec,
+                     m.object_type, m.redshift, json.dumps(m.data))
+                )
+
+            for det in candidate.detections:
+                conn.execute(
+                    "INSERT INTO candidate_detections "
+                    "(candidate_id, filter, flux, snr, pixel_x, pixel_y, "
+                    "flux_mjy, mag_ab, flux_err, flux_mjy_err, mag_ab_err, local_rms) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (candidate.id, det.filter, det.flux, det.snr,
+                     det.pixel_coords[0], det.pixel_coords[1],
+                     det.flux_mjy, det.mag_ab,
+                     det.flux_err, det.flux_mjy_err, det.mag_ab_err,
+                     det.local_rms)
+                )
+
+            inserted += 1
+
+    return inserted
+
+
+def _bulk_load_candidates(rows, conn) -> builtins.list[Candidate]:
+    if not rows:
+        return []
+
+    ids = [row["id"] for row in rows]
+    placeholders = ",".join(["?"] * len(ids))
+
+    match_rows = conn.execute(
+        f"SELECT * FROM catalog_matches WHERE candidate_id IN ({placeholders})",
+        ids
+    ).fetchall()
+
+    det_rows = conn.execute(
+        f"SELECT * FROM candidate_detections WHERE candidate_id IN ({placeholders})",
+        ids
+    ).fetchall()
+
+    matches_by_id: dict = {}
+    for mr in match_rows:
+        cid = mr["candidate_id"]
+        matches_by_id.setdefault(cid, []).append(CatalogMatch(
+            catalog=mr["catalog"],
+            source_id=mr["source_id"] or "",
+            separation_arcsec=mr["separation_arcsec"] or 0.0,
+            object_type=mr["object_type"],
+            redshift=mr["redshift"],
+            data=_safe_json_dict(mr["data"]),
+        ))
+
+    dets_by_id: dict = {}
+    for dr in det_rows:
+        cid = dr["candidate_id"]
+        dk = dr.keys()
+        kw = {}
+        if "flux_mjy" in dk:
+            kw["flux_mjy"] = dr["flux_mjy"]
+        if "mag_ab" in dk:
+            kw["mag_ab"] = dr["mag_ab"]
+        if "flux_err" in dk:
+            kw["flux_err"] = dr["flux_err"]
+        if "flux_mjy_err" in dk:
+            kw["flux_mjy_err"] = dr["flux_mjy_err"]
+        if "mag_ab_err" in dk:
+            kw["mag_ab_err"] = dr["mag_ab_err"]
+        if "local_rms" in dk:
+            kw["local_rms"] = dr["local_rms"]
+        dets_by_id.setdefault(cid, []).append(Detection(
+            filter=dr["filter"], flux=dr["flux"], snr=dr["snr"],
+            pixel_coords=(dr["pixel_x"], dr["pixel_y"]), **kw
+        ))
+
+    result = []
+    for row in rows:
+        created = row["created_at"]
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created)
+        keys = row.keys()
+        result.append(Candidate(
+            id=row["id"],
+            ra=row["ra"],
+            dec=row["dec"],
+            flux=row["flux"],
+            snr=row["snr"],
+            classification=row["classification"],
+            report_id=row["report_id"],
+            pixel_coords=(row["pixel_x"] or 0.0, row["pixel_y"] or 0.0),
+            created_at=created,
+            catalog_matches=matches_by_id.get(row["id"], []),
+            detections=dets_by_id.get(row["id"], []),
+            tags=json.loads(row["tags"]) if row["tags"] else [],
+            notes=json.loads(row["notes"]) if row["notes"] else [],
+            confidence=row["confidence"] if "confidence" in keys else 0.0,
+            hints=json.loads(row["hints"]) if "hints" in keys and row["hints"] else [],
+            flux_err=row["flux_err"] if "flux_err" in keys else None,
+            flux_mjy_err=row["flux_mjy_err"] if "flux_mjy_err" in keys else None,
+            mag_ab_err=row["mag_ab_err"] if "mag_ab_err" in keys else None,
+        ))
+
+    return result
+
+
 def _row_to_candidate(row, conn) -> Candidate:
     matches_rows = conn.execute(
         "SELECT * FROM catalog_matches WHERE candidate_id = ?",
@@ -163,15 +299,15 @@ def query(
         rows = conn.execute(sql, params).fetchall()
 
         center = SkyCoord(ra, dec, unit="deg")
-        keep = []
+        kept_rows = []
         for row in rows:
             if row["ra"] is None or math.isnan(row["ra"]):
                 continue
             pos = SkyCoord(row["ra"], row["dec"], unit="deg")
             if center.separation(pos).arcsec <= radius_arcsec:
-                keep.append(_row_to_candidate(row, conn))
+                kept_rows.append(row)
 
-    return keep
+        return _bulk_load_candidates(kept_rows, conn)
 
 
 def update(candidate_id: str, **kwargs) -> Candidate:
@@ -263,7 +399,7 @@ def list(
         params.extend([limit, offset])
 
         rows = conn.execute(sql, params).fetchall()
-        return [_row_to_candidate(r, conn) for r in rows]
+        return _bulk_load_candidates(rows, conn)
 
 
 def delete(candidate_id: str) -> None:

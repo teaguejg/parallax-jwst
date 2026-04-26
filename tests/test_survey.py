@@ -112,6 +112,92 @@ class TestAcquireCorruptFiles:
         mock_query.assert_called_once()
 
 
+class TestMastDownload:
+    """Tests for _mast_download validation logic (no live network calls)."""
+
+    def _mock_products(self, filename):
+        from astropy.table import Table
+        return Table({
+            "productFilename": [filename],
+            "dataURI": [f"mast:JWST/product/{filename}"],
+        })
+
+    @patch("astroquery.mast.Observations.download_file")
+    @patch("astroquery.mast.Observations.filter_products")
+    @patch("astroquery.mast.Observations.get_product_list")
+    def test_skips_valid_existing_file(self, mock_get, mock_filter, mock_dl, tmp_db):
+        from parallax.acquisition import _mast_download
+
+        fname = "jw01234_nircam_f200w_i2d.fits"
+        dest_dir = os.path.join(tmp_db, "downloads", "mast_dl_test")
+        os.makedirs(dest_dir, exist_ok=True)
+        local_path = os.path.join(dest_dir, fname)
+        make_fits().writeto(local_path, overwrite=True)
+
+        products = self._mock_products(fname)
+        mock_get.return_value = products
+        mock_filter.return_value = products
+
+        result = _mast_download(MagicMock(), dest_dir)
+
+        mock_dl.assert_not_called()
+        assert local_path in result
+
+    @patch("astroquery.mast.Observations.download_file")
+    @patch("astroquery.mast.Observations.filter_products")
+    @patch("astroquery.mast.Observations.get_product_list")
+    def test_deletes_corrupt_and_redownloads(self, mock_get, mock_filter, mock_dl, tmp_db):
+        from parallax.acquisition import _mast_download
+
+        fname = "jw01234_nircam_f200w_i2d.fits"
+        dest_dir = os.path.join(tmp_db, "downloads", "mast_dl_test2")
+        os.makedirs(dest_dir, exist_ok=True)
+        local_path = os.path.join(dest_dir, fname)
+
+        with open(local_path, "wb") as f:
+            f.write(b"not a fits file")
+
+        products = self._mock_products(fname)
+        mock_get.return_value = products
+        mock_filter.return_value = products
+
+        def fake_download(uri, local_path=None):
+            make_fits().writeto(local_path, overwrite=True)
+            return ("COMPLETE", None, local_path)
+        mock_dl.side_effect = fake_download
+
+        result = _mast_download(MagicMock(), dest_dir)
+
+        mock_dl.assert_called_once()
+        assert local_path in result
+
+    @patch("astroquery.mast.Observations.download_file")
+    @patch("astroquery.mast.Observations.filter_products")
+    @patch("astroquery.mast.Observations.get_product_list")
+    def test_discards_truncated_post_download(self, mock_get, mock_filter, mock_dl, tmp_db):
+        from parallax.acquisition import _mast_download
+
+        fname = "jw01234_nircam_f200w_i2d.fits"
+        dest_dir = os.path.join(tmp_db, "downloads", "mast_dl_test3")
+        os.makedirs(dest_dir, exist_ok=True)
+        local_path = os.path.join(dest_dir, fname)
+
+        products = self._mock_products(fname)
+        mock_get.return_value = products
+        mock_filter.return_value = products
+
+        def fake_truncated(uri, local_path=None):
+            with open(local_path, "wb") as f:
+                f.write(b"truncated junk")
+            return ("COMPLETE", None, local_path)
+        mock_dl.side_effect = fake_truncated
+
+        result = _mast_download(MagicMock(), dest_dir)
+
+        assert local_path not in result
+        assert not os.path.exists(local_path)
+
+
 class TestDetect:
     def test_finds_sources(self, tmp_db):
         hdul = make_fits(n_sources=3, noise=0.05)
@@ -195,6 +281,68 @@ class TestDetect:
         # all sources should have positive snr computed from local rms
         for s in results:
             assert s["snr"] > 0
+
+    def _make_two_source_sci(self, shape=(100, 100)):
+        # low noise base with two clearly detectable patches at known positions
+        rng = np.random.default_rng(1)
+        data = rng.normal(0, 0.005, shape).astype(np.float32)
+        data[28:33, 28:33] = 6.0   # source A
+        data[68:73, 68:73] = 6.0   # source B
+        return data
+
+    def test_dq_masks_flagged_source(self, tmp_db):
+        from parallax.survey import detect
+
+        shape = (100, 100)
+        sci = self._make_two_source_sci(shape)
+        dq = np.zeros(shape, dtype=np.int32)
+        dq[28:33, 28:33] = 1  # flag source A
+
+        hdul_none = make_fits(shape=shape, n_sources=0, noise=0.001)
+        hdul_none["SCI"].data = sci.copy()
+        path_none = os.path.join(tmp_db, "dq_none.fits")
+        hdul_none.writeto(path_none, overwrite=True)
+
+        hdul_dq = make_fits(shape=shape, n_sources=0, noise=0.001, dq_data=dq)
+        hdul_dq["SCI"].data = sci.copy()
+        path_dq = os.path.join(tmp_db, "dq_flagged.fits")
+        hdul_dq.writeto(path_dq, overwrite=True)
+
+        results_none = detect(path_none, snr_threshold=3.0, min_pixels=5)
+        results_dq = detect(path_dq, snr_threshold=3.0, min_pixels=5)
+        assert len(results_dq) < len(results_none)
+
+    def test_dq_absent_runs_unchanged(self, tmp_db):
+        # regression: no DQ extension means detection proceeds as before
+        hdul = make_fits(n_sources=3, noise=0.05)
+        path = os.path.join(tmp_db, "dq_absent.fits")
+        hdul.writeto(path, overwrite=True)
+        from parallax.survey import detect
+        results = detect(path, snr_threshold=1.5, min_pixels=5)
+        assert len(results) >= 1
+
+    def test_dq_bit1_only_not_masked(self, tmp_db):
+        # bit 1 set (value 2), bit 0 clear - must not suppress any detections
+        from parallax.survey import detect
+
+        shape = (100, 100)
+        sci = self._make_two_source_sci(shape)
+
+        hdul_none = make_fits(shape=shape, n_sources=0, noise=0.001)
+        hdul_none["SCI"].data = sci.copy()
+        path_none = os.path.join(tmp_db, "bit1_none.fits")
+        hdul_none.writeto(path_none, overwrite=True)
+
+        dq_bit1 = np.zeros(shape, dtype=np.int32)
+        dq_bit1[28:33, 28:33] = 2  # bit 1 only
+        hdul_bit1 = make_fits(shape=shape, n_sources=0, noise=0.001, dq_data=dq_bit1)
+        hdul_bit1["SCI"].data = sci.copy()
+        path_bit1 = os.path.join(tmp_db, "bit1_dq.fits")
+        hdul_bit1.writeto(path_bit1, overwrite=True)
+
+        results_none = detect(path_none, snr_threshold=3.0, min_pixels=5)
+        results_bit1 = detect(path_bit1, snr_threshold=3.0, min_pixels=5)
+        assert len(results_bit1) == len(results_none)
 
 
 class TestResolve:
@@ -280,8 +428,8 @@ class TestResolve:
 
 
 class TestReport:
-    @patch("parallax.catalog.add", return_value="cnd_12345678")
-    def test_writes_json(self, mock_add, tmp_db):
+    @patch("parallax.catalog.add_batch", return_value=1)
+    def test_writes_json(self, mock_add_batch, tmp_db):
         from parallax.survey import report
         hdul = make_fits()
         fits_path = _write_fits(hdul, tmp_db)
@@ -301,8 +449,8 @@ class TestReport:
         assert data["target"] == "test target"
         assert data["n_sources_detected"] == 10
 
-    @patch("parallax.catalog.add", return_value="cnd_12345678")
-    def test_report_fields(self, mock_add, tmp_db):
+    @patch("parallax.catalog.add_batch", return_value=2)
+    def test_report_fields(self, mock_add_batch, tmp_db):
         from parallax.survey import report
         hdul = make_fits()
         fits_path = _write_fits(hdul, tmp_db)
@@ -798,6 +946,55 @@ class TestMergeDetections:
         merged = _merge_detections(d)
         assert merged[0]["detections"][0]["filter"] == "UNKNOWN"
 
+    def test_kdtree_grouping_by_position(self, tmp_db):
+        from parallax.survey import _merge_detections
+        # A-B separation ~1.07" (within 2"), A-C separation ~36" (outside 2")
+        d_a = {"ra": 83.82000, "dec": -5.39000, "flux": 100.0, "snr": 10.0,
+               "pixel_x": 100.0, "pixel_y": 100.0, "label": 1, "bbox": {}, "filter": "F200W"}
+        d_b = {"ra": 83.82030, "dec": -5.39000, "flux":  50.0, "snr":  5.0,
+               "pixel_x": 103.0, "pixel_y": 100.0, "label": 2, "bbox": {}, "filter": "F444W"}
+        d_c = {"ra": 83.82000, "dec": -5.38000, "flux":  80.0, "snr":  7.0,
+               "pixel_x": 100.0, "pixel_y": 140.0, "label": 3, "bbox": {}, "filter": "F200W"}
+        merged = _merge_detections([d_a, d_b, d_c])
+        assert len(merged) == 2
+        ab = next(m for m in merged if m["snr"] == 10.0)
+        assert len(ab["detections"]) == 2
+        assert {d["filter"] for d in ab["detections"]} == {"F200W", "F444W"}
+        c_group = next(m for m in merged if m["snr"] == 7.0)
+        assert len(c_group["detections"]) == 1
+
+    def test_large_field_merge(self, tmp_db):
+        # 500 detections on a grid with ~36" spacing - nothing should merge
+        from parallax.survey import _merge_detections
+        rng = np.random.default_rng(99)
+        dets = [
+            {"ra": 83.0 + i * 0.01, "dec": -5.0 + j * 0.01,
+             "flux": float(rng.uniform(50, 500)), "snr": float(rng.uniform(3, 20)),
+             "pixel_x": float(i * 8), "pixel_y": float(j * 8),
+             "label": i * 20 + j, "bbox": {}, "filter": "F200W"}
+            for i in range(25) for j in range(20)
+        ]
+        merged = _merge_detections(dets)
+        assert len(merged) == 500
+        for m in merged:
+            assert "detections" in m
+            assert "snr" in m
+            assert "ra" in m
+
+    def test_nan_mixed_with_valid(self, tmp_db):
+        # NaN-coord detections pass through individually alongside valid ones
+        from parallax.survey import _merge_detections
+        valid = {"ra": 83.82, "dec": -5.39, "flux": 100.0, "snr": 5.0,
+                 "pixel_x": 100.0, "pixel_y": 100.0, "label": 1, "bbox": {}, "filter": "F200W"}
+        bad = {"ra": float("nan"), "dec": float("nan"), "flux": 20.0, "snr": 2.0,
+               "pixel_x": 10.0, "pixel_y": 10.0, "label": 2, "bbox": {}, "filter": "F444W"}
+        merged = _merge_detections([valid, bad])
+        assert len(merged) == 2
+        nan_entry = next(m for m in merged if math.isnan(m["ra"]))
+        assert len(nan_entry["detections"]) == 1
+        valid_entry = next(m for m in merged if not math.isnan(m["ra"]))
+        assert len(valid_entry["detections"]) == 1
+
 
 class TestDetectFilterName:
     def test_filter_key_in_output(self, tmp_db):
@@ -1207,7 +1404,6 @@ class TestCatalogMatchDataRoundTrip:
 
 
 def _make_report_dict(data=None):
-    """minimal report dict for serialization tests"""
     return {
         "id": "20240101_abcd1234",
         "target": "test",

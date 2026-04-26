@@ -1,6 +1,6 @@
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (
-    QToolBar, QLabel, QLineEdit, QPushButton, QCheckBox,
+    QToolBar, QLabel, QLineEdit, QPushButton, QToolButton, QMenu,
 )
 
 
@@ -16,7 +16,7 @@ class _TargetInput(QLineEdit):
 
 class ParallaxToolbar(QToolBar):
     run_requested = pyqtSignal(str)
-    toggle_known = pyqtSignal(bool)
+    layers_changed = pyqtSignal(dict)
     settings_requested = pyqtSignal()
     search_requested = pyqtSignal(str)
 
@@ -35,10 +35,49 @@ class ParallaxToolbar(QToolBar):
         self.run_button.clicked.connect(self._on_run_clicked)
         self.addWidget(self.run_button)
 
-        self.known_checkbox = QCheckBox("Show known")
-        self.known_checkbox.setChecked(False)
-        self.known_checkbox.toggled.connect(self.toggle_known)
-        self.addWidget(self.known_checkbox)
+        self._layers_menu = QMenu(self)
+        self._act_unverified = self._layers_menu.addAction("Unverified")
+        self._act_unverified.setCheckable(True)
+        self._act_unverified.setChecked(True)
+        self._act_conf_high = self._layers_menu.addAction("  High")
+        self._act_conf_high.setCheckable(True)
+        self._act_conf_high.setChecked(True)
+        self._act_conf_med = self._layers_menu.addAction("  Med")
+        self._act_conf_med.setCheckable(True)
+        self._act_conf_med.setChecked(True)
+        self._act_conf_low = self._layers_menu.addAction("  Low")
+        self._act_conf_low.setCheckable(True)
+        self._act_conf_low.setChecked(True)
+        self._layers_menu.addSeparator()
+        self._act_known = self._layers_menu.addAction("Known")
+        self._act_known.setCheckable(True)
+        self._act_known.setChecked(False)
+        self._act_bookmarked = self._layers_menu.addAction("Bookmarked")
+        self._act_bookmarked.setCheckable(True)
+        self._act_bookmarked.setChecked(True)
+        self._act_viewed = self._layers_menu.addAction("Viewed")
+        self._act_viewed.setCheckable(True)
+        self._act_viewed.setChecked(False)
+
+        self._cascading = False
+
+        self._act_unverified.toggled.connect(self._on_unverified_toggled)
+        for act in (self._act_conf_high, self._act_conf_med, self._act_conf_low):
+            act.toggled.connect(self._on_tier_toggled)
+        for act in (self._act_known, self._act_bookmarked, self._act_viewed):
+            act.toggled.connect(self._on_layer_toggled)
+
+        self._layers_btn = QToolButton()
+        self._layers_btn.setText("Layers")
+        self._layers_btn.setMenu(self._layers_menu)
+        self._layers_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._layers_btn.setFixedHeight(24)
+        self._layers_btn.setStyleSheet(
+            "QToolButton { padding: 0 8px; }"
+            "QToolButton::menu-indicator { image: none; }"
+        )
+        self.addWidget(self._layers_btn)
 
         self.settings_button = QPushButton("Settings")
         self.settings_button.clicked.connect(self.settings_requested)
@@ -61,6 +100,40 @@ class ParallaxToolbar(QToolBar):
         self.progress_label = QLabel()
         self.progress_label.setVisible(False)
         self.addWidget(self.progress_label)
+
+    def get_layer_state(self):
+        return {
+            "unverified": self._act_unverified.isChecked(),
+            "known": self._act_known.isChecked(),
+            "bookmarked": self._act_bookmarked.isChecked(),
+            "viewed": self._act_viewed.isChecked(),
+            "conf_high": self._act_conf_high.isChecked(),
+            "conf_med": self._act_conf_med.isChecked(),
+            "conf_low": self._act_conf_low.isChecked(),
+        }
+
+    def _on_unverified_toggled(self, checked):
+        if self._cascading:
+            return
+        self._cascading = True
+        for act in (self._act_conf_high, self._act_conf_med, self._act_conf_low):
+            act.setChecked(checked)
+        self._cascading = False
+        self._on_layer_toggled(checked)
+
+    def _on_tier_toggled(self, _):
+        if self._cascading:
+            return
+        self._cascading = True
+        any_on = (self._act_conf_high.isChecked() or
+                  self._act_conf_med.isChecked() or
+                  self._act_conf_low.isChecked())
+        self._act_unverified.setChecked(any_on)
+        self._cascading = False
+        self._on_layer_toggled(None)
+
+    def _on_layer_toggled(self, _):
+        self.layers_changed.emit(self.get_layer_state())
 
     def _on_run_clicked(self):
         text = self.target_input.text().strip()
