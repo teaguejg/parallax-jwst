@@ -98,14 +98,39 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
         for row in products:
             uri = str(row["dataURI"])
             filename = os.path.basename(str(row["productFilename"]))
+            local_path = os.path.join(dest_dir, filename)
+
+            # scenario 1: file on disk from a prior interrupted download
+            if os.path.exists(local_path):
+                try:
+                    with fits.open(local_path) as hdul:
+                        hdul["SCI"].header
+                    paths_downloaded.append(local_path)
+                    continue
+                except Exception:
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
+
             if on_progress:
                 on_progress("downloading", filename)
-            local_path = os.path.join(dest_dir, filename)
             try:
                 result = Observations.download_file(uri,
                                                     local_path=local_path)
                 if result[0] == "COMPLETE":
-                    paths_downloaded.append(local_path)
+                    # scenario 2: validate before accepting a fresh download
+                    try:
+                        with fits.open(local_path) as hdul:
+                            hdul["SCI"].header
+                        paths_downloaded.append(local_path)
+                    except Exception:
+                        logger.warning("downloaded file is truncated or corrupt,"
+                                       " discarding: %s", filename)
+                        try:
+                            os.remove(local_path)
+                        except OSError:
+                            pass
             except Exception as e:
                 logger.warning("failed to download %s: %s", filename, e)
                 continue
@@ -114,7 +139,6 @@ def _mast_download(obs_rows, dest_dir, on_progress=None) -> list[str]:
 
 
 def _get_expected_filenames(obs_rows) -> set[str]:
-    """Return the set of expected i2d mosaic filenames from MAST product list."""
     from astroquery.mast import Observations
     try:
         with _quiet_stdout():
@@ -208,7 +232,7 @@ def acquire(
 
     dl_path = config.get("data.download_path")
 
-    # direct coordinate input -- skip all name resolution
+    # direct coordinate input - skip name resolution
     if ra is not None and dec is not None:
         slug = f"coord_{ra:.3f}_{dec:.3f}".replace("-", "m").replace(".", "p")
         slug_dir = os.path.join(dl_path, "mastDownload", "JWST", slug)

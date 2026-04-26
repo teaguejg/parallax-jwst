@@ -47,6 +47,30 @@ class TestAddGet:
             catalog.add(cand)
 
 
+class TestAddBatch:
+    def test_inserts_multiple(self, tmp_db):
+        from parallax import catalog
+        cands = [_make_candidate(id=f"cnd_batch{i:04d}") for i in range(3)]
+        count = catalog.add_batch(cands)
+        assert count == 3
+        for c in cands:
+            assert catalog.get(c.id) is not None
+
+    def test_skips_duplicate_silently(self, tmp_db):
+        from parallax import catalog
+        existing = _make_candidate(id="cnd_bexist001")
+        catalog.add(existing)
+        fresh = _make_candidate(id="cnd_bfresh001")
+        count = catalog.add_batch([existing, fresh])
+        assert count == 1
+        assert catalog.get(fresh.id) is not None
+        assert catalog.get(existing.id) is not None
+
+    def test_empty_returns_zero(self, tmp_db):
+        from parallax import catalog
+        assert catalog.add_batch([]) == 0
+
+
 class TestQuery:
     def test_within_radius(self, tmp_db):
         from parallax import catalog
@@ -79,6 +103,18 @@ class TestQuery:
         catalog.add(_make_candidate(id="cnd_q2", cls="known"))
         results = catalog.query(83.8221, -5.3911, 5.0, classification="known")
         assert all(c.classification == "known" for c in results)
+
+    def test_catalog_matches_survive_query(self, tmp_db):
+        from parallax import catalog
+        cand = _make_candidate(
+            id="cnd_querymatch",
+            matches=[CatalogMatch("NED", "gal1", 1.2, "Galaxy", None, {})]
+        )
+        catalog.add(cand)
+        results = catalog.query(83.8221, -5.3911, 2.0)
+        assert len(results) == 1
+        assert len(results[0].catalog_matches) == 1
+        assert results[0].catalog_matches[0].catalog == "NED"
 
 
 class TestUpdate:
@@ -165,6 +201,19 @@ class TestList:
         results = catalog.list(tags=["followup"])
         assert len(results) == 1
         assert results[0].id == "cnd_tagged"
+
+    def test_catalog_matches_survive_list(self, tmp_db):
+        from parallax import catalog
+        cand = _make_candidate(
+            id="cnd_listmatch",
+            matches=[CatalogMatch("SIMBAD", "star99", 0.5, "Star", 0.0, {"mag": 14.0})]
+        )
+        catalog.add(cand)
+        results = catalog.list()
+        found = next(c for c in results if c.id == "cnd_listmatch")
+        assert len(found.catalog_matches) == 1
+        assert found.catalog_matches[0].catalog == "SIMBAD"
+        assert found.catalog_matches[0].source_id == "star99"
 
 
 class TestDbMigrationErrorHandling:

@@ -13,6 +13,7 @@ from astropy.wcs import WCS, FITSFixedWarning
 from astropy.convolution import convolve
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from scipy.spatial import cKDTree
 
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
@@ -148,7 +149,7 @@ def detect(
             sci = _find_science_hdu(hdul)
         except (BufferError, TypeError, OSError) as exc:
             raise ValueError(
-                f"Cannot read '{fits_path}' - file may be truncated or corrupt. "
+                f"Cannot read '{fits_path}' - file is truncated or corrupt. "
                 f"Delete it and re-run to trigger a fresh download."
             ) from exc
         if sci is None:
@@ -158,7 +159,7 @@ def detect(
             data = sci.data.astype(np.float64)
         except (BufferError, TypeError, OSError) as exc:
             raise ValueError(
-                f"Cannot read '{fits_path}' - file may be truncated or corrupt. "
+                f"Cannot read '{fits_path}' - file is truncated or corrupt. "
                 f"Delete it and re-run to trigger a fresh download."
             ) from exc
 
@@ -187,6 +188,14 @@ def detect(
             wht_data = hdul["WHT"].data.astype(np.float64)
         except (KeyError, AttributeError):
             pass
+
+        dq_mask = None
+        try:
+            dq_raw = hdul["DQ"].data
+            if dq_raw is not None:
+                dq_mask = (dq_raw & 1).astype(bool)
+        except (KeyError, AttributeError):
+            pass
     finally:
         hdul.close()
 
@@ -207,7 +216,8 @@ def detect(
                                filter_size=filter_size,
                                sigma_clip=SigmaClip(sigma=3),
                                bkg_estimator=MedianBackground(),
-                               interpolator=interp)
+                               interpolator=interp,
+                               mask=dq_mask)
         except Exception:
             fallback_box = max(4, min(box_size,
                                       data.shape[0] // 4,
@@ -217,7 +227,8 @@ def detect(
                                    filter_size=filter_size,
                                    sigma_clip=SigmaClip(sigma=3),
                                    bkg_estimator=MedianBackground(),
-                                   interpolator=interp)
+                                   interpolator=interp,
+                                   mask=dq_mask)
                 logger.debug("background fallback box_size=%d", fallback_box)
             except Exception:
                 med = np.nanmedian(data)
@@ -230,7 +241,8 @@ def detect(
                                     filter_size=filter_size,
                                     sigma_clip=SigmaClip(sigma=3),
                                     bkg_estimator=MedianBackground(),
-                                    interpolator=interp)
+                                    interpolator=interp,
+                                    mask=dq_mask)
                 combined_bkg = np.minimum(bkg.background, bkg2.background)
                 bkg_sub = data - combined_bkg
                 bkg_rms = min(bkg.background_rms_median, bkg2.background_rms_median)
@@ -252,7 +264,11 @@ def detect(
 
         stddev = fwhm / 2.3548
         kernel = Gaussian2DKernel(stddev, x_size=5, y_size=5)
-        convolved = convolve(bkg_sub, kernel)
+        conv_input = bkg_sub
+        if dq_mask is not None:
+            conv_input = bkg_sub.copy()
+            conv_input[dq_mask] = np.nan
+        convolved = convolve(conv_input, kernel)
 
         if two_scale:
             threshold = bkg_rms * snr_threshold
@@ -262,11 +278,11 @@ def detect(
         else:
             threshold = snr_threshold * bkg_rms
 
-        segmap = detect_sources(convolved, threshold, npixels=min_pixels)
+        segmap = detect_sources(convolved, threshold, npixels=min_pixels, mask=dq_mask)
         if segmap is None:
             return []
 
-        cat = SourceCatalog(bkg_sub, segmap, wcs=wcs)
+        cat = SourceCatalog(bkg_sub, segmap, wcs=wcs, mask=dq_mask)
 
         sources = []
         for src in cat:
@@ -329,6 +345,8 @@ def detect(
             if err_data is not None:
                 try:
                     seg_mask = segmap.data == src.label
+                    if dq_mask is not None:
+                        seg_mask = seg_mask & ~dq_mask
                     err_pixels = err_data[seg_mask]
                     if wht_data is not None:
                         w_pixels = wht_data[seg_mask]
@@ -440,7 +458,17 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
 
     ras = np.array([d["ra"] for d in valid])
     decs = np.array([d["dec"] for d in valid])
-    coords = SkyCoord(ras, decs, unit="deg")
+
+    # unit-sphere Cartesian coords for KD-tree neighbor lookup
+    ra_rad = np.radians(ras)
+    dec_rad = np.radians(decs)
+    xyz = np.column_stack([
+        np.cos(dec_rad) * np.cos(ra_rad),
+        np.cos(dec_rad) * np.sin(ra_rad),
+        np.sin(dec_rad),
+    ])
+    chord = 2.0 * np.sin(np.radians(match_radius_arcsec / 3600.0) / 2.0)
+    tree = cKDTree(xyz)
 
     # greedy clustering: assign each detection to a group
     used = np.zeros(len(valid), dtype=bool)
@@ -452,12 +480,12 @@ def _merge_detections(all_detections: list[dict], match_radius_arcsec: float = 2
     for idx in snr_order:
         if used[idx]:
             continue
-        # find all unmatched detections within radius
-        seps = coords[idx].separation(coords)
-        nearby = np.where((seps.arcsec <= match_radius_arcsec) & (~used))[0]
+        # find all points within chord distance, then keep only unmatched ones
+        candidates = tree.query_ball_point(xyz[idx], chord)
+        nearby = [n for n in candidates if not used[n]]
         for n in nearby:
             used[n] = True
-        groups.append(list(nearby))
+        groups.append(nearby)
 
     merged = []
     for group in groups:
@@ -1065,7 +1093,6 @@ def report(
         with open(prov_path, "w") as f:
             json.dump(prov, f, indent=2, default=str)
 
-    # TODO: batch the db writes
     from parallax._db import get_db
     with get_db() as conn:
         conn.execute(
@@ -1089,13 +1116,7 @@ def report(
             )
 
     from parallax import catalog
-    n_persisted = 0
-    for c in rpt.candidates:
-        try:
-            catalog.add(c)
-            n_persisted += 1
-        except Exception as e:
-            logger.debug("could not persist candidate %s: %s", c.id, e)
+    n_persisted = catalog.add_batch(rpt.candidates)
     if n_persisted < len(rpt.candidates):
         logger.info("persisted %d/%d candidates", n_persisted, len(rpt.candidates))
 
@@ -1208,7 +1229,7 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
             if rms_ratio > 3.0:
                 c_lines.append(
                     f"**{c.id} - Background:** RMS varies {rms_ratio:.1f}x across filters"
-                    f" - photometry may be unreliable in structured emission."
+                    f" - photometry is unreliable in structured emission."
                 )
         if c_lines:
             _annotated.extend(c_lines)
@@ -1239,9 +1260,9 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
     lines.append("PIXAR_SR header keyword. Flux uncertainties are propagated from the i2d")
     lines.append("ERR extension (weighted by WHT where available). No aperture correction")
     lines.append("has been applied.")
-    lines.append("Point source fluxes may be underestimated by 10-20% depending on filter")
-    lines.append("and source size. Extended source fluxes will be underestimated further.")
-    lines.append("Background subtraction in structured emission fields may include nebular")
+    lines.append("Point source fluxes are underestimated by 10-20% without aperture correction,")
+    lines.append("depending on filter and source size. Extended source fluxes are underestimated")
+    lines.append("further. Background subtraction in structured emission fields picks up nebular")
     lines.append("knots as discrete sources. Auto-tags (narrowband_only, line_dominated,")
     lines.append("compact, extended, isolated, crowded) are heuristic flags, not physical")
     lines.append("measurements. Confidence scores reflect detection quality, not")
@@ -1292,7 +1313,6 @@ _NARROWBAND_FILTERS = frozenset([
 
 
 def _compute_hints(candidate, det_dicts):
-    """Derive sub-classification hint strings for an unverified candidate."""
     if candidate.classification != "unverified":
         return []
 
@@ -1329,7 +1349,7 @@ def _compute_hints(candidate, det_dicts):
     _check_filter_excess(det_dicts, "F162M", ["F150W", "F182M", "F200W"],
                          2.0, "F162M excess vs continuum", hints)
 
-    return hints
+    return list(dict.fromkeys(hints))
 
 
 def _check_filter_excess(det_dicts, target_filter, ref_order, threshold, label, hints):

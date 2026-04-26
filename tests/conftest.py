@@ -7,7 +7,8 @@ from astropy.wcs import WCS
 
 
 def make_fits(shape=(200, 200), n_sources=3, noise=0.1,
-              include_err=False, include_wht=False, pixar_sr=None):
+              include_err=False, include_wht=False, pixar_sr=None,
+              dq_data=None):
     rng = np.random.default_rng(42)
     data = rng.normal(0, noise, shape).astype(np.float32)
 
@@ -41,6 +42,9 @@ def make_fits(shape=(200, 200), n_sources=3, noise=0.1,
     if include_wht:
         wht_data = rng.uniform(0.5, 1.5, shape).astype(np.float32)
         extensions.append(fits.ImageHDU(wht_data, name="WHT"))
+
+    if dq_data is not None:
+        extensions.append(fits.ImageHDU(dq_data.astype(np.int32), name="DQ"))
 
     return fits.HDUList(extensions)
 

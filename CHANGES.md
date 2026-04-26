@@ -1,5 +1,26 @@
 # Changes
 
+## 1.4.2
+
+- DQ saturation masking: pixels flagged DO_NOT_USE in the FITS data
+  quality extension are excluded from background estimation, source
+  detection, and flux measurement.
+- Detection merging is much faster on dense fields.
+- Truncated FITS files from interrupted downloads are caught and
+  re-downloaded.
+- Sky view fills the panel without blank bars. Dark background in
+  both themes. North arrow computed from WCS so it reflects instrument
+  rotation.
+- Zoom out clamped to 1.0x; indicator moved to lower right.
+- Layer visibility replaces the "Show known" checkbox: four toggleable
+  layers (Unverified, Known, Bookmarked, Viewed) with confidence
+  sub-filters (High/Med/Low) under Unverified.
+- Detail panel buttons stay visible while scrolling. Detection table
+  condensed to Filter, SNR, Mag(AB) with full data in tooltips.
+- Legend matches visible layers.
+- Duplicate hint strings on multi-tile candidates removed.
+- Faster scatter rendering, UI redraws, and report persistence.
+
 ## 1.4.1
 
 - AB magnitudes were 15 mag too faint due to a unit conversion error. Fixed.
@@ -10,72 +31,18 @@
 
 ## 1.4.0
 
-- Target name normalization now handles lowercase catalog prefixes (e.g.
-  "ngc 3132" resolves correctly in addition to "NGC 3132"). Whitespace is
-  stripped before matching.
-- SkyPanel replaced scatter plot with a FITS composite as the default sky view.
-  The panel loads FITS files for the active report, reprojects them onto a shared
-  WCS frame using `reproject`, and displays the coadded image on a plain axes
-  with RA/Dec tick labels derived from the WCS (x-axis inverted for RA).
-- Candidate markers overlay the sky image using WCS coordinate-to-pixel
-  conversion. Classification coloring, bookmarked/viewed overlays, selection
-  markers, and hit-testing all carry over from the scatter implementation.
-- Falls back to the scatter plot when FITS data is unavailable or WCS fails.
-- Composite is built off the main thread (SkyCompositeWorker) with a
-  "Loading sky view..." label shown while processing.
-- The "Field" / "Scatter" / "Both" mode cycling removed; single view replaces it.
-- New dependency: `reproject>=0.13`.
-- 13 new tests for sky view logic (fallback, marker positions, coloring, signals).
-- `get_fits_for_report` now returns `dict[str, list[str]]` (all on-disk paths
-  per filter). SkyCompositeWorker builds a multi-detector mosaic from the filter
-  with the most files using `reproject.mosaicking.find_optimal_celestial_wcs` and
-  `reproject_and_coadd`. Falls back to a single tile if mosaicking fails.
-  Tiles are downsampled 4x via strided slicing in `_load_tiles` with matching
-  WCS adjustments (CRPIX scaled, CD matrix or CDELT scaled by 4) to reduce
-  memory and compute.
-- SessionLogHandler now uses `self.format(record)` instead of
-  `record.getMessage()`, so exception tracebacks appear in the LogBar.
-- GUI launch adds a `logging.FileHandler` at `data/parallax.log` (truncated
-  each launch, DEBUG level) so all log output including tracebacks is captured
-  to disk.
-- Fixed LogBar message duplication: progress events were reaching the log bar
-  through both the logging handler signal and a direct `append()` call in
-  `_on_progress`. Removed the redundant direct call.
-- Fixed selection marker crash: `_draw_selection_marker` used `ax.scatter`
-  whose `PathCollection.remove()` raises `NotImplementedError` in current
-  matplotlib. Replaced with `ax.plot` returning a `Line2D`, which removes
-  cleanly.
-- Removed sky composite downsampling and its broken WCS adjustment. The
-  `_downsample` helper patched `crpix`/`cdelt` without updating the PC matrix,
-  producing incorrect marker positions on JWST images. Full-resolution arrays
-  are now passed through to the display.
-- Sky view uses plain axes with WCS-derived RA/Dec tick labels instead of
-  WCSAxes projection, avoiding conflicts between WCSAxes and manual axis limit
-  control. Zoom, pan, and `set_xlim`/`set_ylim` operate in pixel coordinates.
-- Initial draw shows the full image extent from `imshow` defaults.
-  `invert_xaxis()` runs after marker overlay but before limits are captured,
-  so Reset restores the full inverted view.
-- Replaced `tight_layout()` with fixed `subplots_adjust` margins to eliminate
-  layout warnings.
-- Right-click drag panning on the sky view. Press captures display-pixel
-  coordinates and current axis limits; move computes the pixel delta and
-  converts to data units via `transData.inverted()` to avoid jitter from
-  shifting data coordinates; release ends the pan.
-- Fixed stale `_selected_marker` reference after `fig.clear()`:
-  `_draw_wcs_view` now clears the marker before clearing the figure,
-  preventing `.remove()` calls on a dead artist.
-- Fixed overlay refreshes (bookmark toggle, viewed tag) resetting the zoom
-  level. `_draw_wcs_view` now captures axis limits before redraw and
-  restores them after when the view has already been drawn once.
-- Fixed WCS downsampling in `_load_tiles`: NIRCam i2d files use a CD matrix
-  for pixel scale, not CDELT. The code now checks `wcs.wcs.has_cd()` and
-  scales the CD matrix by 4 when present, falling back to CDELT scaling
-  otherwise. CRPIX adjustment corrected to `(old - 1) / 4 + 1` per axis.
-  This fixes incorrect `all_world2pix` marker placement on CD-matrix tiles.
-- Zoom level indicator in WCS sky view: a text label in the lower-left corner
-  shows the current zoom ratio (e.g. "2.3x") when zoomed in or out. Hidden
-  at 1.0x. Updates on scroll, zoom buttons, pan release, and reset. Not shown
-  in scatter fallback mode.
+- Sky view replaced with a FITS composite built from the actual science
+  images. Candidate markers overlay the real sky using WCS coordinates.
+  Falls back to scatter when FITS data is unavailable.
+- Multi-detector mosaics: when a filter has multiple tiles, they are
+  reprojected and coadded automatically.
+- Right-click drag to pan. Scroll to zoom. Zoom level indicator when
+  zoomed in.
+- Overlay refreshes (bookmarks, viewed tags) no longer reset zoom.
+- Target names accept lowercase ("ngc 3132" works).
+- Session log captures full tracebacks to data/parallax.log.
+- Fixed selection marker crash on current matplotlib.
+- New dependency: reproject>=0.13.
 
 ## 1.3.1
 
