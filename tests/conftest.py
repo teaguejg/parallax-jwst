@@ -66,7 +66,7 @@ def tmp_db(tmp_dir):
         "mast": {"instruments": ["NIRCAM", "MIRI"], "calib_level": 3, "product_type": "IMAGE"},
         "detection": {"snr_threshold": 3.0, "min_pixels": 25, "cutout_padding": 20,
                       "kernel_fwhm": 2.0, "cutout_size": 60},
-        "resolver": {"search_radius_arcsec": 2.0, "catalogs": ["SIMBAD", "NED", "GAIA"],
+        "resolver": {"search_radius_arcsec": 2.0, "catalogs": ["SIMBAD", "NED", "GAIA", "2MASS", "ALLWISE"],
                       "timeout_seconds": 30},
         "report": {"output_format": "both", "include_known": False},
         "cache": {"detection_enabled": True, "catalog_enabled": True,

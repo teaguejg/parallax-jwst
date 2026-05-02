@@ -1,5 +1,13 @@
 # Changes
 
+## 1.5.0
+
+- 2MASS Point Source Catalog and AllWISE Source Catalog added as cross-reference
+  backends. Both are queried during resolve() alongside SIMBAD, NED, and Gaia.
+- Detection cache capped at 200 entries; oldest entries are removed
+  automatically on each write.
+- resolve() docstring corrected to reflect configurable catalog list.
+
 ## 1.4.3
 
 - Detections with invalid coordinates are dropped instead of crashing the

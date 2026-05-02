@@ -76,9 +76,13 @@ def _set_detection_cache(fits_path, h, snr, npix, fwhm, detections):
             "VALUES (?,?,?,?,?,?,?)",
             (fits_path, h, snr, npix, fwhm, json.dumps(detections), datetime.now(UTC).isoformat())
         )
+        conn.execute(
+            "DELETE FROM detection_cache WHERE id NOT IN ("
+            "SELECT id FROM detection_cache ORDER BY created_at DESC LIMIT 200"
+            ")"
+        )
 
 
-# TODO: add LRU eviction if cache table grows large
 def _get_catalog_cache(field_key):
     from parallax._db import get_db
     now = datetime.now(UTC).isoformat()
@@ -648,6 +652,80 @@ def _query_gaia(center_ra, center_dec, radius_arcsec, timeout) -> list[dict]:
     return rows
 
 
+def _query_2mass(center_ra, center_dec, radius_arcsec, timeout) -> list[dict]:
+    if config.get("cache.catalog_enabled"):
+        key = f"{center_ra:.4f}_{center_dec:.4f}_{radius_arcsec}_2MASS"
+        cached = _get_catalog_cache(key)
+        if cached is not None:
+            logger.debug("catalog cache HIT: %s", key)
+            return cached
+        logger.debug("catalog cache MISS: %s", key)
+
+    from astroquery.ipac.irsa import Irsa
+    try:
+        coord = SkyCoord(center_ra, center_dec, unit="deg")
+        result = Irsa.query_region(coord, catalog="fp_psc", spatial="Cone",
+                                   radius=radius_arcsec * u.arcsec,
+                                   columns="ra,dec,designation,j_m,h_m,k_m")
+    except Exception as e:
+        logger.warning("2MASS query failed: %s", e)
+        return []
+
+    if result is None or len(result) == 0:
+        return []
+
+    rows = []
+    for row in result:
+        rows.append({
+            "catalog": "2MASS",
+            "source_id": str(row["designation"]) if "designation" in result.colnames else "",
+            "ra": float(row["ra"]),
+            "dec": float(row["dec"]),
+            "object_type": None,
+            "redshift": None,
+        })
+    if config.get("cache.catalog_enabled"):
+        _set_catalog_cache(key, "2MASS", center_ra, center_dec, radius_arcsec, rows)
+    return rows
+
+
+def _query_allwise(center_ra, center_dec, radius_arcsec, timeout) -> list[dict]:
+    if config.get("cache.catalog_enabled"):
+        key = f"{center_ra:.4f}_{center_dec:.4f}_{radius_arcsec}_ALLWISE"
+        cached = _get_catalog_cache(key)
+        if cached is not None:
+            logger.debug("catalog cache HIT: %s", key)
+            return cached
+        logger.debug("catalog cache MISS: %s", key)
+
+    from astroquery.ipac.irsa import Irsa
+    try:
+        coord = SkyCoord(center_ra, center_dec, unit="deg")
+        result = Irsa.query_region(coord, catalog="allwise_p3as_psd", spatial="Cone",
+                                   radius=radius_arcsec * u.arcsec,
+                                   columns="ra,dec,designation,w1mpro,w2mpro,w3mpro,w4mpro")
+    except Exception as e:
+        logger.warning("AllWISE query failed: %s", e)
+        return []
+
+    if result is None or len(result) == 0:
+        return []
+
+    rows = []
+    for row in result:
+        rows.append({
+            "catalog": "ALLWISE",
+            "source_id": str(row["designation"]),
+            "ra": float(row["ra"]),
+            "dec": float(row["dec"]),
+            "object_type": None,
+            "redshift": None,
+        })
+    if config.get("cache.catalog_enabled"):
+        _set_catalog_cache(key, "ALLWISE", center_ra, center_dec, radius_arcsec, rows)
+    return rows
+
+
 def _compute_field_circle(detections, search_radius_arcsec):
     valid = [(d["ra"], d["dec"]) for d in detections
              if not (math.isnan(d["ra"]) or math.isnan(d["dec"]))]
@@ -740,7 +818,7 @@ def resolve(
     detections: list[dict],
     search_radius: float | None = None,
 ) -> tuple[list[Candidate], bool]:
-    """Cross-reference detections against SIMBAD, NED, and Gaia."""
+    """Cross-reference detections against configured catalogs."""
     if search_radius is None:
         search_radius = config.get("resolver.search_radius_arcsec", 2.0)
     timeout = config.get("resolver.timeout_seconds", 30)
@@ -764,6 +842,8 @@ def resolve(
             ("SIMBAD", _query_simbad, field_radius_deg),
             ("NED", _query_ned, field_radius_arcsec),
             ("GAIA", _query_gaia, field_radius_arcsec),
+            ("2MASS", _query_2mass, field_radius_arcsec),
+            ("ALLWISE", _query_allwise, field_radius_arcsec),
         ]:
             if name not in enabled_catalogs:
                 continue

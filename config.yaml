@@ -36,5 +36,7 @@ resolver:
   - SIMBAD
   - NED
   - GAIA
+  - 2MASS
+  - ALLWISE
   search_radius_arcsec: 2.0
   timeout_seconds: 30

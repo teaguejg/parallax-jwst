@@ -383,10 +383,12 @@ class TestResolve:
             for i in range(n)
         ]
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
-    def test_unverified_when_no_matches(self, g, n, s, tmp_db):
+    def test_unverified_when_no_matches(self, g, n, s, aw, tm, tmp_db):
         from parallax.survey import resolve
         dets = self._make_detections(2)
         cands, gaia_failed = resolve(dets)
@@ -395,10 +397,12 @@ class TestResolve:
             assert c.classification == "unverified"
             assert c.id.startswith("cnd_")
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned")
     @patch("parallax.survey._query_simbad")
-    def test_known_with_two_catalogs(self, mock_s, mock_n, mock_g, tmp_db):
+    def test_known_with_two_catalogs(self, mock_s, mock_n, mock_g, aw, tm, tmp_db):
         # field-wide results: dicts with ra/dec near the detection
         mock_s.return_value = [{"catalog": "SIMBAD", "source_id": "obj1",
                                 "ra": 83.82, "dec": -5.39,
@@ -410,10 +414,12 @@ class TestResolve:
         cands, _ = resolve(self._make_detections(1))
         assert cands[0].classification == "known"
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad")
-    def test_notable_single_catalog(self, mock_s, mock_n, mock_g, tmp_db):
+    def test_notable_single_catalog(self, mock_s, mock_n, mock_g, aw, tm, tmp_db):
         mock_s.return_value = [{"catalog": "SIMBAD", "source_id": "obj1",
                                 "ra": 83.82, "dec": -5.39,
                                 "object_type": None, "redshift": None}]
@@ -421,19 +427,23 @@ class TestResolve:
         cands, _ = resolve(self._make_detections(1))
         assert cands[0].classification == "known"
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", side_effect=Exception("timeout"))
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
-    def test_handles_catalog_timeout(self, s, n, g, tmp_db):
+    def test_handles_catalog_timeout(self, s, n, g, aw, tm, tmp_db):
         from parallax.survey import resolve
         cands, gaia_failed = resolve(self._make_detections(1))
         assert len(cands) == 1
         assert gaia_failed is True
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
-    def test_batch_queries_called_once(self, mock_g, mock_n, mock_s, tmp_db):
+    def test_batch_queries_called_once(self, mock_g, mock_n, mock_s, aw, tm, tmp_db):
         """3 queries total regardless of detection count."""
         from parallax.survey import resolve
         dets = self._make_detections(50)
@@ -442,10 +452,12 @@ class TestResolve:
         assert mock_n.call_count == 1
         assert mock_g.call_count == 1
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad")
-    def test_far_catalog_source_no_match(self, mock_s, mock_n, mock_g, tmp_db):
+    def test_far_catalog_source_no_match(self, mock_s, mock_n, mock_g, aw, tm, tmp_db):
         # catalog source 1 degree away shouldn't match any detection
         mock_s.return_value = [{"catalog": "SIMBAD", "source_id": "far_obj",
                                 "ra": 84.82, "dec": -5.39,
@@ -455,10 +467,12 @@ class TestResolve:
         assert cands[0].classification == "unverified"
         assert len(cands[0].catalog_matches) == 0
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
-    def test_resolver_catalogs_config_filters_queries(self, mock_g, mock_n, mock_s, tmp_db):
+    def test_resolver_catalogs_config_filters_queries(self, mock_g, mock_n, mock_s, aw, tm, tmp_db):
         from parallax.config import config
         from parallax.survey import resolve
         config._data["resolver"]["catalogs"] = ["SIMBAD"]
@@ -470,10 +484,12 @@ class TestResolve:
         mock_n.assert_not_called()
         mock_g.assert_not_called()
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
-    def test_nan_coord_detection_dropped(self, mock_g, mock_n, mock_s, tmp_db):
+    def test_nan_coord_detection_dropped(self, mock_g, mock_n, mock_s, aw, tm, tmp_db):
         from parallax.survey import resolve
         dets = [
             {"ra": float("nan"), "dec": float("nan"), "flux": 10.0,
@@ -626,6 +642,23 @@ class TestDetectionCache:
         # different params means different results (or empty)
         assert isinstance(r2, list)
 
+    def test_detection_cache_eviction(self, tmp_db):
+        from parallax.survey import _set_detection_cache
+        from parallax._db import get_db
+
+        for i in range(205):
+            _set_detection_cache(
+                f"/fake/path_{i:04d}.fits",
+                f"hash{i:04d}",
+                3.0, 5, 2.0,
+                [],
+            )
+
+        with get_db() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM detection_cache").fetchone()[0]
+
+        assert count <= 200
+
 
 class TestCatalogCache:
     def _dets(self):
@@ -669,10 +702,12 @@ class TestCandidateDedup:
                  "pixel_x": 100.0, "pixel_y": 100.0, "label": 1,
                  "bbox": {"ixmin": 98, "ixmax": 103, "iymin": 98, "iymax": 103}}]
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
-    def test_dedup_reuses_existing(self, s, n, g, tmp_db):
+    def test_dedup_reuses_existing(self, s, n, g, aw, tm, tmp_db):
         from parallax.survey import resolve
         from parallax import catalog
 
@@ -685,10 +720,12 @@ class TestCandidateDedup:
         cands2, _ = resolve(self._dets())
         assert cands2[0].id == orig_id
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad")
-    def test_classification_upgrade(self, mock_s, mock_n, mock_g, tmp_db):
+    def test_classification_upgrade(self, mock_s, mock_n, mock_g, aw, tm, tmp_db):
         from parallax.survey import resolve
         from parallax import catalog
 
@@ -712,10 +749,12 @@ class TestCandidateDedup:
         cls_changes = [h for h in hist if h["field"] == "classification"]
         assert len(cls_changes) >= 1
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
-    def test_classification_no_downgrade(self, s, n, g, tmp_db):
+    def test_classification_no_downgrade(self, s, n, g, aw, tm, tmp_db):
         from parallax.survey import resolve
         from parallax import catalog
 
@@ -1229,10 +1268,12 @@ class TestComputeConfidence:
             v_wide = _compute_confidence(10.0, 2, 3, 3.0, "kron")
         assert v_wide < v_default  # wider radius makes near-miss score 0
 
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_allwise", return_value=[])
     @patch("parallax.survey._query_simbad", return_value=[])
     @patch("parallax.survey._query_ned", return_value=[])
     @patch("parallax.survey._query_gaia", return_value=[])
-    def test_resolve_sets_confidence(self, g, n, s, tmp_db):
+    def test_resolve_sets_confidence(self, g, n, s, aw, tm, tmp_db):
         from parallax.survey import resolve
         dets = [
             {"ra": 83.82, "dec": -5.39, "flux": 100.0,
@@ -2053,6 +2094,84 @@ class TestMinPixelsDefault:
         """detection.min_pixels default must be 5 to catch NIRCam SW point sources."""
         from parallax.config import _DEFAULTS
         assert _DEFAULTS["detection"]["min_pixels"] == 5
+
+
+class TestIrsaCatalogQueries:
+    def test_2mass_returns_expected_shape(self, tmp_db):
+        from astropy.table import Table
+        from parallax.survey import _query_2mass
+
+        mock_table = Table({
+            "ra": [83.82],
+            "dec": [-5.39],
+            "designation": ["J053516.90-053340.8"],
+            "j_m": [14.5],
+            "h_m": [14.0],
+            "k_m": [13.5],
+        })
+        with patch("astroquery.ipac.irsa.Irsa.query_region", return_value=mock_table):
+            result = _query_2mass(83.82, -5.39, 120.0, 30)
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["catalog"] == "2MASS"
+        assert isinstance(result[0]["ra"], float)
+
+    def test_allwise_returns_expected_shape(self, tmp_db):
+        from astropy.table import Table
+        from parallax.survey import _query_allwise
+
+        mock_table = Table({
+            "ra": [83.82],
+            "dec": [-5.39],
+            "designation": ["J053516.90-053340.8"],
+            "w1mpro": [12.3],
+            "w2mpro": [12.1],
+            "w3mpro": [11.8],
+            "w4mpro": [11.2],
+        })
+        with patch("astroquery.ipac.irsa.Irsa.query_region", return_value=mock_table):
+            result = _query_allwise(83.82, -5.39, 120.0, 30)
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["catalog"] == "ALLWISE"
+        assert isinstance(result[0]["source_id"], str)
+
+    def test_2mass_failure_returns_empty(self, tmp_db):
+        from parallax.survey import _query_2mass
+
+        with patch("astroquery.ipac.irsa.Irsa.query_region",
+                   side_effect=Exception("timeout")):
+            result = _query_2mass(83.82, -5.39, 120.0, 30)
+
+        assert result == []
+
+    def test_allwise_failure_returns_empty(self, tmp_db):
+        from parallax.survey import _query_allwise
+
+        with patch("astroquery.ipac.irsa.Irsa.query_region",
+                   side_effect=Exception("timeout")):
+            result = _query_allwise(83.82, -5.39, 120.0, 30)
+
+        assert result == []
+
+    @patch("parallax.survey._query_allwise", return_value=[])
+    @patch("parallax.survey._query_2mass", return_value=[])
+    @patch("parallax.survey._query_gaia", return_value=[])
+    @patch("parallax.survey._query_ned", return_value=[])
+    @patch("parallax.survey._query_simbad", return_value=[])
+    def test_resolve_queries_2mass_and_allwise(self, mock_s, mock_n, mock_g,
+                                               mock_2mass, mock_allwise, tmp_db):
+        from parallax.survey import resolve
+
+        dets = [{"ra": 83.82, "dec": -5.39, "flux": 100.0, "snr": 5.0,
+                 "pixel_x": 100.0, "pixel_y": 100.0, "label": 1,
+                 "bbox": {"ixmin": 98, "ixmax": 103, "iymin": 98, "iymax": 103}}]
+        resolve(dets)
+
+        assert mock_2mass.call_count == 1
+        assert mock_allwise.call_count == 1
 
 
 class TestDetectionCacheVersionTag:

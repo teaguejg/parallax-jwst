@@ -21,7 +21,7 @@ _DEFAULTS = {
     },
     "resolver": {
         "search_radius_arcsec": 2.0,
-        "catalogs": ["SIMBAD", "NED", "GAIA"],
+        "catalogs": ["SIMBAD", "NED", "GAIA", "2MASS", "ALLWISE"],
         "timeout_seconds": 30,
     },
     "report": {
