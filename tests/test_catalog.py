@@ -4,7 +4,7 @@ from datetime import datetime, UTC
 
 import pytest
 
-from parallax.types import Candidate, CatalogMatch
+from parallax.types import Candidate, CatalogMatch, Detection
 
 
 def _make_candidate(id="cnd_00000001", ra=83.8221, dec=-5.3911, cls="unverified",
@@ -178,6 +178,31 @@ class TestDelete:
         with pytest.raises(KeyError):
             catalog.delete("cnd_ghost")
 
+    def test_delete_removes_candidate_detections(self, tmp_db):
+        from parallax import catalog
+        from parallax._db import get_db
+        cand = Candidate(
+            id="cnd_del_dets001", ra=83.82, dec=-5.39, flux=100.0, snr=5.0,
+            classification="unverified", report_id="rpt_20260101_aabbccdd",
+            pixel_coords=(100.0, 100.0), created_at=datetime.now(UTC),
+            detections=[Detection(filter="F200W", flux=100.0, snr=5.0,
+                                  pixel_coords=(100.0, 100.0))],
+        )
+        catalog.add(cand)
+        with get_db() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM candidate_detections WHERE candidate_id = ?",
+                (cand.id,)
+            ).fetchone()[0]
+        assert count == 1
+        catalog.delete(cand.id)
+        with get_db() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM candidate_detections WHERE candidate_id = ?",
+                (cand.id,)
+            ).fetchone()[0]
+        assert count == 0
+
 
 class TestList:
     def test_limit_offset(self, tmp_db):
@@ -268,3 +293,70 @@ class TestDbForeignKeysAndWal:
                     "separation_arcsec) VALUES (?, ?, ?, ?)",
                     ("nonexistent_cnd", "SIMBAD", "star1", 0.5)
                 )
+
+
+class TestDeleteReport:
+    def _insert_report(self, report_id, conn):
+        conn.execute(
+            "INSERT INTO reports (id, target, instrument, filter, "
+            "observation_id, fits_path, created_at, n_sources_detected, "
+            "n_catalog_matched, n_unverified) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (report_id, "NGC 1234", "NIRCAM", "F200W", "OBS001",
+             "/data/test.fits", "2026-01-01T00:00:00", 10, 2, 8)
+        )
+        conn.execute(
+            "INSERT INTO report_inputs (report_id, fits_path, observation_id, filter) "
+            "VALUES (?,?,?,?)",
+            (report_id, "/data/test.fits", "OBS001", "F200W")
+        )
+
+    def test_delete_report_cascades(self, tmp_db):
+        from parallax import catalog
+        from parallax._db import get_db
+
+        report_id = "rpt_20260101_deadbeef"
+        with get_db() as conn:
+            self._insert_report(report_id, conn)
+
+        cand_ids = []
+        for i in range(2):
+            cid = f"cnd_delrpt{i:04d}"
+            cand_ids.append(cid)
+            cand = Candidate(
+                id=cid, ra=83.82 + i * 0.01, dec=-5.39, flux=100.0, snr=5.0,
+                classification="unverified", report_id=report_id,
+                pixel_coords=(100.0, 100.0), created_at=datetime.now(UTC),
+                catalog_matches=[CatalogMatch("SIMBAD", f"src{i}", 0.5, "Star", None, {})],
+                detections=[Detection(filter="F200W", flux=100.0, snr=5.0,
+                                      pixel_coords=(100.0, 100.0))],
+            )
+            catalog.add(cand)
+            catalog.update(cid, tags=["test"])  # writes a candidate_history row
+
+        catalog.delete_report(report_id)
+
+        pl = ",".join(["?"] * len(cand_ids))
+        with get_db() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM reports WHERE id = ?", (report_id,)
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM candidates WHERE id IN ({pl})", cand_ids
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM catalog_matches WHERE candidate_id IN ({pl})", cand_ids
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM candidate_detections WHERE candidate_id IN ({pl})", cand_ids
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM candidate_history WHERE candidate_id IN ({pl})", cand_ids
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM report_inputs WHERE report_id = ?", (report_id,)
+            ).fetchone()[0] == 0
+
+    def test_delete_report_missing_raises(self, tmp_db):
+        from parallax import catalog
+        with pytest.raises(KeyError):
+            catalog.delete_report("rpt_nonexistent")

@@ -208,15 +208,11 @@ def detect(
         filter_size = config.get("detection.background_filter_size", 3)
         interp_mode = config.get("detection.background_interp", "zoom")
 
-        from photutils.background import BkgZoomInterpolator, BkgIDWInterpolator
-        interp = BkgIDWInterpolator() if interp_mode == "idw" else BkgZoomInterpolator()
-
         try:
             bkg = Background2D(data, box_size=box_size,
                                filter_size=filter_size,
                                sigma_clip=SigmaClip(sigma=3),
                                bkg_estimator=MedianBackground(),
-                               interpolator=interp,
                                mask=dq_mask)
         except Exception:
             fallback_box = max(4, min(box_size,
@@ -227,7 +223,6 @@ def detect(
                                    filter_size=filter_size,
                                    sigma_clip=SigmaClip(sigma=3),
                                    bkg_estimator=MedianBackground(),
-                                   interpolator=interp,
                                    mask=dq_mask)
                 logger.debug("background fallback box_size=%d", fallback_box)
             except Exception:
@@ -241,7 +236,6 @@ def detect(
                                     filter_size=filter_size,
                                     sigma_clip=SigmaClip(sigma=3),
                                     bkg_estimator=MedianBackground(),
-                                    interpolator=interp,
                                     mask=dq_mask)
                 combined_bkg = np.minimum(bkg.background, bkg2.background)
                 bkg_sub = data - combined_bkg
@@ -273,12 +267,12 @@ def detect(
         if two_scale:
             threshold = bkg_rms * snr_threshold
         elif bkg is not None:
-            threshold = detect_threshold(bkg_sub, nsigma=snr_threshold,
+            threshold = detect_threshold(bkg_sub, n_sigma=snr_threshold,
                                          background=bkg.background)
         else:
             threshold = snr_threshold * bkg_rms
 
-        segmap = detect_sources(convolved, threshold, npixels=min_pixels, mask=dq_mask)
+        segmap = detect_sources(convolved, threshold, n_pixels=min_pixels, mask=dq_mask)
         if segmap is None:
             return []
 
@@ -288,7 +282,7 @@ def detect(
         for src in cat:
             if wcs is not None:
                 try:
-                    sky = wcs.pixel_to_world(src.xcentroid, src.ycentroid)
+                    sky = wcs.pixel_to_world(src.x_centroid, src.y_centroid)
                     ra_val = float(sky.ra.deg)
                     dec_val = float(sky.dec.deg)
                 except Exception:
@@ -303,8 +297,8 @@ def detect(
             local_rms = None
             if rms_map is not None:
                 try:
-                    px = int(round(float(src.ycentroid)))
-                    py = int(round(float(src.xcentroid)))
+                    px = int(round(float(src.y_centroid)))
+                    py = int(round(float(src.x_centroid)))
                     px = max(0, min(px, rms_map.shape[0] - 1))
                     py = max(0, min(py, rms_map.shape[1] - 1))
                     local_rms = float(rms_map[px, py])
@@ -338,7 +332,7 @@ def detect(
                 except Exception:
                     mag_ab_val = None
 
-            # flux uncertainty from ERR (and optionally WHT) extensions
+            # ERR in JWST i2d carries all variance components from the pipeline
             flux_err_val = None
             flux_mjy_err_val = None
             mag_ab_err_val = None
@@ -348,16 +342,7 @@ def detect(
                     if dq_mask is not None:
                         seg_mask = seg_mask & ~dq_mask
                     err_pixels = err_data[seg_mask]
-                    if wht_data is not None:
-                        w_pixels = wht_data[seg_mask]
-                        # zero-weight pixels contribute zero variance
-                        good = w_pixels > 0
-                        if good.any():
-                            var = np.zeros_like(err_pixels)
-                            var[good] = (err_pixels[good] ** 2) / w_pixels[good]
-                            flux_err_val = float(np.sqrt(np.nansum(var)))
-                    else:
-                        flux_err_val = float(np.sqrt(np.nansum(err_pixels ** 2)))
+                    flux_err_val = float(np.sqrt(np.nansum(err_pixels ** 2)))
 
                     if flux_err_val is not None and flux_err_val > 0:
                         if pixar_sr is not None and pixar_sr > 0:
@@ -382,7 +367,7 @@ def detect(
             except Exception:
                 ellip = None
             try:
-                semimajor = float(src.semimajor_sigma.value)
+                semimajor = float(src.semimajor_axis.value)
                 if math.isnan(semimajor):
                     semimajor = None
             except Exception:
@@ -395,8 +380,8 @@ def detect(
                 "flux": flux_val,
                 "snr": snr_val,
                 "flux_source": flux_src,
-                "pixel_x": float(src.xcentroid),
-                "pixel_y": float(src.ycentroid),
+                "pixel_x": float(src.x_centroid),
+                "pixel_y": float(src.y_centroid),
                 "label": int(src.label),
                 "bbox": {
                     "ixmin": int(bb.ixmin),
@@ -759,6 +744,8 @@ def resolve(
     if search_radius is None:
         search_radius = config.get("resolver.search_radius_arcsec", 2.0)
     timeout = config.get("resolver.timeout_seconds", 30)
+    _cat_cfg = config.get("resolver.catalogs", [])
+    enabled_catalogs = {c.upper() for c in _cat_cfg} if _cat_cfg else {"SIMBAD", "NED", "GAIA"}
 
     valid_idx = [i for i, d in enumerate(detections)
                  if not (math.isnan(d["ra"]) or math.isnan(d["dec"]))]
@@ -778,6 +765,8 @@ def resolve(
             ("NED", _query_ned, field_radius_arcsec),
             ("GAIA", _query_gaia, field_radius_arcsec),
         ]:
+            if name not in enabled_catalogs:
+                continue
             try:
                 rows = qfn(fc_ra, fc_dec, radius_arg, timeout)
                 catalog_results[name] = rows
@@ -799,14 +788,8 @@ def resolve(
                 if nearest_seps[i] < nearest_catalog_sep[i]:
                     nearest_catalog_sep[i] = nearest_seps[i]
 
-    match_by_idx = {}
-    sep_by_idx = {}
-    for vi, oi in enumerate(valid_idx):
-        match_by_idx[oi] = per_det_matches[vi]
-        sep_by_idx[oi] = nearest_catalog_sep[vi]
-
     match_radius = config.get("cache.candidate_match_radius_arcsec", 2.0)
-    dedup_map = {}  # detection index -> existing Candidate
+    dedup_map = {}  # position in valid_idx -> existing Candidate
     from parallax import catalog as _cat
 
     if valid_dets and fc_ra is not None:
@@ -823,7 +806,7 @@ def resolve(
             idx, sep2d, _ = det_coords.match_to_catalog_sky(ex_coords)
             for vi, oi in enumerate(valid_idx):
                 if sep2d[vi].arcsec <= match_radius:
-                    dedup_map[oi] = existing_cands[idx[vi]]
+                    dedup_map[vi] = existing_cands[idx[vi]]
 
     _cls_rank = {"unverified": 0, "known": 1}
 
@@ -834,8 +817,9 @@ def resolve(
     )))
 
     candidates = []
-    for i, det in enumerate(detections):
-        det_matches = match_by_idx.get(i, [])
+    for vi, oi in enumerate(valid_idx):
+        det = detections[oi]
+        det_matches = per_det_matches[vi]
 
         catalogs_with_hits = set()
         has_redshift = False
@@ -885,7 +869,7 @@ def resolve(
         extended = area is not None and area >= 400
 
         # proximity tags from catalog separation
-        nsep = sep_by_idx.get(i, float("inf"))
+        nsep = nearest_catalog_sep[vi]
         isolated = nsep == float("inf") or nsep > 30.0
         crowded = nsep > search_radius and nsep <= 10.0
 
@@ -928,7 +912,7 @@ def resolve(
                 _best_err = _d
                 break
 
-        ex = dedup_map.get(i)
+        ex = dedup_map.get(vi)
         if ex is not None:
             if _cls_rank.get(cls, 0) > _cls_rank.get(ex.classification, 0):
                 _cat.update(ex.id, classification=cls)
@@ -1084,7 +1068,7 @@ def report(
                 "crowded_count": sum(1 for c in candidates if "crowded" in c.tags),
                 "near_emission_count": sum(1 for c in candidates if "near_emission" in c.tags),
             },
-            "flux_calibration": "MJy via PIXAR_SR header keyword, uncertainties from ERR/WHT extensions, no aperture correction",
+            "flux_calibration": "MJy via PIXAR_SR header keyword, uncertainties from ERR extension, no aperture correction",
             "input_files": [
                 {"obs_id": oid, "filter": filt, "filename": os.path.basename(path)}
                 for (path, filt), oid in zip(fits_inputs, obs_ids)
@@ -1258,7 +1242,7 @@ def _write_markdown(rpt, path, include_known, gaia_failed=False,
     lines.append("## Caveats")
     lines.append("Flux(MJy) is Kron aperture photometry converted from MJy/sr using the")
     lines.append("PIXAR_SR header keyword. Flux uncertainties are propagated from the i2d")
-    lines.append("ERR extension (weighted by WHT where available). No aperture correction")
+    lines.append("ERR extension. No aperture correction")
     lines.append("has been applied.")
     lines.append("Point source fluxes are underestimated by 10-20% without aperture correction,")
     lines.append("depending on filter and source size. Extended source fluxes are underestimated")

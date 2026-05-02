@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import (
 
 import parallax as par
 
+logger = logging.getLogger(__name__)
+
 from parallax.gui.log_handler import SessionLogHandler
 from parallax.gui.widgets.toolbar import ParallaxToolbar
 from parallax.gui.widgets.log_bar import LogBar
@@ -48,6 +50,7 @@ class RunWorker(QThread):
             )
             self.finished.emit(report)
         except Exception as e:
+            logger.exception("reduce failed")
             self.failed.emit(str(e))
 
 
@@ -227,6 +230,11 @@ class MainWindow(QMainWindow):
         if self._sky._current_report_id == report_id:
             self._sky.show_idle()
             self._detail.show_idle()
+
+        try:
+            par.catalog.delete_report(report_id)
+        except Exception as e:
+            logger.warning("delete_report failed for %s: %s", report_id, e)
 
 
 def launch():

@@ -1,5 +1,20 @@
 # Changes
 
+## 1.4.3
+
+- Detections with invalid coordinates are dropped instead of crashing the
+  pipeline on insert.
+- Flux uncertainties corrected: the ERR extension is used directly without
+  WHT weighting. Stored flux_err values are affected; mag_ab_err is not.
+- resolver.catalogs config key now controls which catalogs are queried.
+  Previously it was read but had no effect on query behavior.
+- Deleting a report from the GUI removes all associated candidates, catalog
+  matches, detections, history, and input records in one step.
+- Inspection saves go to data/archive/cutouts/ rather than inside the report
+  folder.
+- Pipeline failures write full tracebacks to data/parallax.log.
+- Compatible with photutils 4.0.
+
 ## 1.4.2
 
 - DQ saturation masking: pixels flagged DO_NOT_USE in the FITS data
@@ -104,8 +119,7 @@
 ## 1.2.0
 
 - Flux uncertainties propagated from the JWST i2d ERR extension through to
-  Detection and Candidate. WHT extension used for per-pixel variance weighting
-  where available.
+  Detection and Candidate.
 - New fields on Detection: `flux_err`, `flux_mjy_err`, `mag_ab_err`. Same
   fields added to Candidate from the best-SNR detection with uncertainty data.
 - Report table includes Flux err and Mag err columns.

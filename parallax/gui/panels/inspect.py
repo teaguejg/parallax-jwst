@@ -1019,15 +1019,9 @@ class InspectWindow(QDialog):
     def _save_inspection(self):
         try:
             from parallax.config import config
-            from parallax.types import _target_slug
-            from parallax import archive as _arc
 
-            rpt = _arc.get_report(self._candidate.report_id)
-            target = rpt.target if rpt else "unknown"
-            slug = _target_slug(target)
-            reports_path = config.get("data.reports_path", "data/reports")
-            save_dir = os.path.join(reports_path, slug, "inspections",
-                                    self._candidate.id)
+            archive_path = config.get("data.archive_path", "data/archive")
+            save_dir = os.path.join(archive_path, "cutouts", self._candidate.id)
             os.makedirs(save_dir, exist_ok=True)
 
             import json as _json

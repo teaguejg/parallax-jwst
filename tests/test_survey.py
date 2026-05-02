@@ -321,6 +321,35 @@ class TestDetect:
         results = detect(path, snr_threshold=1.5, min_pixels=5)
         assert len(results) >= 1
 
+    def test_flux_err_ignores_wht(self, tmp_db):
+        # make_fits uses seed 42 so SCI and ERR are identical between both calls;
+        # only WHT presence differs. After the fix, flux_err must be the same
+        # whether or not WHT is present, because ERR already carries full variance.
+        from parallax.survey import detect
+
+        hdul_wht = make_fits(n_sources=3, noise=0.05, include_err=True, include_wht=True)
+        hdul_wht["WHT"].data[:] = 4.0  # uniform, would halve flux_err if WHT were used
+        path_wht = os.path.join(tmp_db, "wht4.fits")
+        hdul_wht.writeto(path_wht, overwrite=True)
+
+        hdul_no = make_fits(n_sources=3, noise=0.05, include_err=True, include_wht=False)
+        path_no = os.path.join(tmp_db, "no_wht.fits")
+        hdul_no.writeto(path_no, overwrite=True)
+
+        r_wht = detect(path_wht, snr_threshold=1.5, min_pixels=5)
+        r_no = detect(path_no, snr_threshold=1.5, min_pixels=5)
+
+        with_err = [r for r in r_wht if r.get("flux_err") is not None]
+        assert len(with_err) >= 1
+        assert len(r_wht) == len(r_no)
+
+        for s_wht, s_no in zip(
+            sorted(r_wht, key=lambda s: s["pixel_x"]),
+            sorted(r_no, key=lambda s: s["pixel_x"]),
+        ):
+            if s_wht.get("flux_err") is not None and s_no.get("flux_err") is not None:
+                assert s_wht["flux_err"] == pytest.approx(s_no["flux_err"])
+
     def test_dq_bit1_only_not_masked(self, tmp_db):
         # bit 1 set (value 2), bit 0 clear - must not suppress any detections
         from parallax.survey import detect
@@ -425,6 +454,37 @@ class TestResolve:
         cands, _ = resolve(self._make_detections(1))
         assert cands[0].classification == "unverified"
         assert len(cands[0].catalog_matches) == 0
+
+    @patch("parallax.survey._query_simbad", return_value=[])
+    @patch("parallax.survey._query_ned", return_value=[])
+    @patch("parallax.survey._query_gaia", return_value=[])
+    def test_resolver_catalogs_config_filters_queries(self, mock_g, mock_n, mock_s, tmp_db):
+        from parallax.config import config
+        from parallax.survey import resolve
+        config._data["resolver"]["catalogs"] = ["SIMBAD"]
+        try:
+            cands, _ = resolve(self._make_detections(1))
+        finally:
+            config._data["resolver"]["catalogs"] = ["SIMBAD", "NED", "GAIA"]
+        mock_s.assert_called_once()
+        mock_n.assert_not_called()
+        mock_g.assert_not_called()
+
+    @patch("parallax.survey._query_simbad", return_value=[])
+    @patch("parallax.survey._query_ned", return_value=[])
+    @patch("parallax.survey._query_gaia", return_value=[])
+    def test_nan_coord_detection_dropped(self, mock_g, mock_n, mock_s, tmp_db):
+        from parallax.survey import resolve
+        dets = [
+            {"ra": float("nan"), "dec": float("nan"), "flux": 10.0,
+             "snr": 3.0, "pixel_x": 50.0, "pixel_y": 50.0, "label": 0,
+             "bbox": {"ixmin": 48, "ixmax": 53, "iymin": 48, "iymax": 53}},
+            {"ra": 83.82, "dec": -5.39, "flux": 100.0,
+             "snr": 5.0, "pixel_x": 100.0, "pixel_y": 100.0, "label": 1,
+             "bbox": {"ixmin": 98, "ixmax": 103, "iymin": 98, "iymax": 103}},
+        ]
+        cands, _ = resolve(dets)
+        assert all(math.isfinite(c.ra) and math.isfinite(c.dec) for c in cands)
 
 
 class TestReport:

@@ -97,3 +97,59 @@ def test_inspect_window_close_cleanup(tmp_db):
     win.show()
     win.close()
     # no segfault or timer warning = success
+
+
+def test_save_inspection_uses_archive_path(tmp_db):
+    from unittest.mock import patch
+    from datetime import datetime, UTC
+    from parallax import catalog
+    from parallax.types import Candidate
+    from parallax.config import config
+    from parallax.gui.panels.inspect import InspectWindow
+
+    cand = Candidate(
+        id="cnd_insp_save001",
+        ra=83.82, dec=-5.39, flux=100.0, snr=5.0,
+        classification="unverified",
+        report_id="rpt_insp_save_test",
+        pixel_coords=(100.0, 100.0),
+        created_at=datetime.now(UTC),
+    )
+    catalog.add(cand)
+
+    archive_path = config.get("data.archive_path")
+    reports_path = config.get("data.reports_path")
+
+    with patch("parallax.gui.platform.reveal_file"):
+        win = InspectWindow("cnd_insp_save001")
+        win._save_inspection()
+        win.close()
+
+    cid = "cnd_insp_save001"
+    save_dir = os.path.join(archive_path, "cutouts", cid)
+    assert os.path.isfile(os.path.join(save_dir, f"{cid}_composite.png"))
+    assert os.path.isfile(os.path.join(save_dir, f"{cid}_strip.png"))
+    assert os.path.isfile(os.path.join(save_dir, f"{cid}_composite.json"))
+    assert os.path.isfile(os.path.join(save_dir, f"{cid}_summary.md"))
+    # nothing should have been written under reports_path
+    assert not os.path.isdir(os.path.join(reports_path, "inspections"))
+
+
+def test_run_worker_logs_exception_on_failure(tmp_db, caplog):
+    import logging
+    from unittest.mock import patch
+    from parallax.gui.app import RunWorker
+
+    worker = RunWorker("NGC 1234")
+    failures = []
+    worker.failed.connect(failures.append)
+
+    with patch("parallax.survey.reduce", side_effect=RuntimeError("mast down")):
+        with caplog.at_level(logging.ERROR, logger="parallax.gui.app"):
+            worker.run()
+
+    assert len(failures) == 1
+    assert "mast down" in failures[0]
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("reduce failed" in r.message for r in error_records)
+    assert any(r.exc_info is not None for r in error_records)

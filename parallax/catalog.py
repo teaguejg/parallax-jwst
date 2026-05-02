@@ -414,5 +414,30 @@ def delete(candidate_id: str) -> None:
                      (candidate_id,))
         conn.execute("DELETE FROM catalog_matches WHERE candidate_id = ?",
                      (candidate_id,))
+        conn.execute("DELETE FROM candidate_detections WHERE candidate_id = ?",
+                     (candidate_id,))
         conn.execute("DELETE FROM candidates WHERE id = ?",
                      (candidate_id,))
+
+
+def delete_report(report_id: str) -> None:
+    """Delete a report and all its child rows in a single transaction."""
+    with get_db() as conn:
+        row = conn.execute("SELECT id FROM reports WHERE id = ?",
+                           (report_id,)).fetchone()
+        if row is None:
+            raise KeyError(report_id)
+
+        cand_rows = conn.execute(
+            "SELECT id FROM candidates WHERE report_id = ?", (report_id,)
+        ).fetchall()
+        cand_ids = [r["id"] for r in cand_rows]
+
+        for cid in cand_ids:
+            conn.execute("DELETE FROM candidate_history WHERE candidate_id = ?", (cid,))
+            conn.execute("DELETE FROM catalog_matches WHERE candidate_id = ?", (cid,))
+            conn.execute("DELETE FROM candidate_detections WHERE candidate_id = ?", (cid,))
+
+        conn.execute("DELETE FROM candidates WHERE report_id = ?", (report_id,))
+        conn.execute("DELETE FROM report_inputs WHERE report_id = ?", (report_id,))
+        conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))

@@ -34,7 +34,7 @@ launch()
 ```
 
 `reduce()` downloads JWST images from MAST, runs source detection, queries
-three catalogs, and writes JSON and markdown reports to `data/reports/`.
+a configurable set of catalogs, and writes JSON and markdown reports to `data/reports/`.
 
 ## Validated targets
 
